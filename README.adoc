@@ -1,0 +1,353 @@
+= CIR
+:notitle:
+:toc:
+:toc-placement: preamble
+:sectnums:
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:warning-caption: :warning:
+endif::[]
+
+image::docs/ReadmeHeader.png[]
+
+CIR is a *C source-to-source compiler* that comes with a JIT.
+This JIT enables arbitrary functions to be evaluated at compile time.
+Additionally, compile-time-evaluated functions can manipulate code as data and call-back into the compiler API,
+enabling _compile-time metaprogramming_ to be performed.
+
+This project is being developed as an undergraduate final year project at the National University of Singapore.
+
+[WARNING]
+====
+This project is still in its infancy and under *heavy development*.
+Don't expect to be able to use this in real C projects yet.
+====
+
+== Getting started
+
+Currently the JIT only compiles for *x86-64* systems that use the *System V ABI*.
+This means it currently only works on Linux (and theoretically Mac OS as well).
+
+Only GCC/Clang (a version that supports the C11 standard) is required to compile CIR.
+MSVC is not supported as the source code currently uses some GCC extensions.
+
+Clone the repository:
+----
+git clone https://github.com/pyokagan/cir.git
+----
+
+and compile it:
+----
+cd cir
+make
+----
+
+== A tour of CIR
+
+=== Compiling programs down to CIR
+
+Here is a program which prints the 20th number in the Fibonacci sequence:
+
+.`fib.c`
+[source,c]
+----
+#include <stdio.h>
+
+static int fib(int n) {
+    int a, b, i;
+    a = 0;
+    b = 1;
+    i = 0;
+    while (i < n) {
+        int c;
+        c = b;
+        b = a + b;
+        a = c;
+        i = i + 1;
+    }
+    return a;
+}
+
+int main(void) {
+    printf("The answer is: %d\n", fib(20));
+    return 0;
+}
+----
+
+To use it with CIR, we first need to pass it through the C preprocessor to process `#includes`:
+
+----
+gcc -E -o fib.cpp.c fib.c
+----
+
+[TIP]
+====
+CIR requires source files to first be run through the C preprocessor.
+For the rest of this document we will assume that this is done.
+====
+
+We can then pass the preprocessed file (`fib.cpp.c`) into CIR:
+
+----
+./cir fib.cpp.c >fib.output.c
+----
+
+The output from CIR is:
+
+.`fib.output.c`
+[source,c]
+----
+static int vid57_fib(int vid58_n)
+{
+    int vid59_a;
+    int vid60_b;
+    int vid61_i;
+    int vid62_c;
+    int vid63;
+    int vid64;
+
+    vid59_a = 0; /* sid1 */
+    vid60_b = 1; /* sid2 */
+    vid61_i = 0; /* sid3 */
+sid4:
+    if (vid61_i < vid58_n) goto sid6; /* sid4 */
+    goto sid13; /* sid5 */
+sid6:
+    vid62_c = vid60_b; /* sid6 */
+    vid63 = vid59_a + vid60_b; /* sid7 */
+    vid60_b = vid63; /* sid8 */
+    vid59_a = vid62_c; /* sid9 */
+    vid64 = vid61_i + 1; /* sid10 */
+    vid61_i = vid64; /* sid11 */
+    goto sid4; /* sid12 */
+sid13:
+    /* nop */; /* sid13 */
+    return vid59_a; /* sid14 */
+}
+extern int printf(char *__restrict __format, ...);
+int main(void)
+{
+    int vid66;
+    int vid67;
+
+    vid66 = vid57_fib(20); /* sid15 */
+    vid67 = printf("The answer is: %d\n", vid66); /* sid16 */
+    return 0; /* sid17 */
+}
+----
+
+As we can see, CIR has compiled `fib.cpp.c` into a three-address-code-like representation that is a subset of the C programming language.
+This representation is called "CIR", meaning "C Immediate Language".
+
+While it may seem at first that the CIR representation is horribly inefficient,
+modern optimizing compilers such as GCC will actually compile both `fib.c` and `fib.output.c` to the https://godbolt.org/z/N4AtaD[same assembly code]:
+
+[source,asm]
+----
+.LC0:
+        .string "The answer is: %d\n"
+main:
+        sub     rsp, 8
+        mov     eax, 20
+        mov     esi, 1
+        mov     edx, 0
+        jmp     .L2
+.L3:
+        mov     esi, ecx
+.L2:
+        lea     ecx, [rdx+rsi]
+        mov     edx, esi
+        sub     eax, 1
+        jne     .L3
+        mov     edi, OFFSET FLAT:.LC0
+        mov     eax, 0
+        call    printf
+        mov     eax, 0
+        add     rsp, 8
+        ret
+----
+
+However, as can be seen from the assembly listing,
+we are actually still computing the value of `fib(20)` at _runtime_.
+Can we do better?
+
+=== The `@` compile-time evaluation operator
+
+CIR extends the C programming language with the compile-time evaluation operator, `@`.
+Function calls that are prefixed with `@` will be evaluated at compile-time.
+
+Here is the modified `fib.c` source file with the `@` operator added:
+
+[source,c]
+----
+#include <stdio.h>
+
+static int fib(int n) {
+    int a, b, i;
+    a = 0;
+    b = 1;
+    i = 0;
+    while (i < n) {
+        int c;
+        c = b;
+        b = a + b;
+        a = c;
+        i = i + 1;
+    }
+    return a;
+}
+
+int main(void) {
+    printf("The answer is: %d\n", @fib(20)); // @ operator added
+    return 0;
+}
+----
+
+CIR now outputs:
+
+[source,c]
+----
+extern int printf(char *__restrict __format, ...);
+int main(void)
+{
+    int vid66;
+
+    vid66 = printf("The answer is: %d\n", 6765); /* sid15 */
+    return 0; /* sid16 */
+}
+----
+
+As we can see, the call to `fib(20)` has been replaced with the constant `6765`,
+which is indeed the 20th number in the fibonacci sequence.
+
+So what happened?
+CIR JIT-compiled the `fib()` function into X86-64 machine code, executed it, and then inlined the result (`6765`) into the callsite.
+
+=== _Arbitrary_ compile-time evaluation
+
+The JIT is a full-featured C compiler footnote:[The JIT compiler is still in its infancy, so full C language support has not been implemented yet. However, it is an explicit goal of the project.].
+This means that you can *use any C language construct you want*, such as conditionals, loops, calling other functions etc.
+
+Furthermore, JIT-compiled code can *call external functions and libraries*.
+This includes C standard library APIs such as `malloc()`, `free()`, `fopen()`, `fwrite()`, `printf()` etc.
+
+For example, here is a compile-time function that reads a file using C standard library APIs and returns it as a string constant:
+
+[source,c]
+----
+#include <stdio.h>
+#include "../cir.h" // include compiler API
+
+extern void *calloc (size_t __nmemb, size_t __size);
+
+// Reads a file and returns it as a string constant
+static CirCodeId readFile(char *path) {
+    FILE *fp;
+    size_t len;
+    char *buffer;
+    fp = fopen(path, "r");
+    fseek(fp, 0, SEEK_END);
+    len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    buffer = calloc(len + 1, 1);
+    fread(buffer, len, 1, fp);
+    fclose(fp);
+    return CirCode_ofExpr(CirValue_ofString(buffer, len + 1));
+}
+
+int main(void) {
+    puts(@readFile("fileToBeRead.txt"));
+    return 0;
+}
+----
+
+However, this also means that the compile-time evaluation may not halt,
+or may even crash.
+_With great power comes great responsibility_,
+developers need to exercise care when writing compile-time functions.
+
+=== Compile-time metaprogramming
+
+Code evaluated at compile-time can *call back into the compiler API*.
+
+CIR will examine the *type* of compile-time-evaluated functions:
+
+* When a compile-time function declares its argument(s) to take a _code object_ (`CirCodeId`),
+CIR will pass the raw code (in IR form) into the function.
+
+* When a compile-time function declares its return type to be a _code object_ (`CirCodeId`),
+CIR will inline the returned code object as-is into the call site.
+
+For example, here is a function that receives `CirCodeId` as an argument,
+and examines the IR contained within:
+
+[source,c]
+----
+#include "cir.h" // include compiler API
+
+// Returns true if code calls a function, otherwise returns false
+static int callsAFunction(CirCodeId code) {
+    CirStmtId stmt;
+    stmt = CirCode_getFirstStmt(code);
+    while (stmt) {
+        if (CirStmt_isCall(stmt)) {
+            return 1;
+        }
+        stmt = CirStmt_getNext(stmt);
+    }
+    return 0;
+}
+----
+
+And can be used as follows:
+
+[source, c]
+----
+@callsAFunction(puts("Hi")); // evaluates to 1
+@callsAFunction(42); // evaluates to 0
+----
+
+[NOTE]
+====
+Notice how a simple `while` loop is sufficient in discovering whether there is a call in an expression.
+CIR is explicitly designed to be _flat_ so as to make such traversals and manipulation of the IR easy,
+without needing to resort to recursive function calls or the visitor pattern which are more of a hassle to write in C.
+====
+
+Here is another function that returns a code object containing a string constant.
+
+[source,c]
+----
+#include <stdio.h>
+#include "cir.h" // include compiler API
+
+static CirCodeId generateCode() {
+    return CirCode_ofExpr(CirValue_ofCString("Inlined String"));
+}
+
+int main(void) {
+    puts(@generateCode());
+    return 0;
+}
+----
+
+And the result is:
+
+[source,c]
+----
+extern int puts(char *__s);
+int main(void)
+{
+    int vid260;
+
+    vid260 = puts("Inlined String"); /* sid4 */
+    return 0; /* sid5 */
+}
+----
+
+== Acknowledgements
+
+This project was initially prototyped with https://github.com/cil-project/cil[CIL] before being ported to C.
+Certain parts of CIL still remain,
+such as the representation of types, structs, typedefs, attributes etc.
