@@ -91,7 +91,7 @@ void CirMachine__log(const CirMachine *);
 extern CirMachine CirMachine__build;
 extern CirMachine CirMachine__host;
 
-extern struct CirTok {
+typedef struct CirToken {
     enum CirTokType {
         CIRTOK_NONE = 0,
         CIRTOK_EOF,
@@ -212,7 +212,9 @@ extern struct CirTok {
             size_t len;
         } stringlit; // CIRTOK_STRINGLIT
     } data;
-} cirtok;
+} CirToken;
+
+extern CirToken cirtok;
 
 // via malloc
 void *cir__xalloc(size_t n) __attribute__((malloc));
@@ -277,6 +279,7 @@ void CirEnv__setLocalTagAsComp(CirCompId);
 // Lexer
 void CirLex__init(const char *path, const CirMachine *);
 void CirLex__next(void);
+void CirLex__push(const CirToken *);
 const char *CirLex__str(uint32_t);
 
 // Parser
@@ -328,6 +331,7 @@ void CirCode__setFirstStmt(CirCodeId, CirStmtId);
 typedef CirArray(const CirAttr *) CirAttrArray;
 void CirAttrArray__add(CirAttrArray *, const CirAttr *);
 void CirAttrArray__merge(CirAttrArray *, const CirAttr * const *srcA, size_t lenA, const CirAttr * const *srcB, size_t lenB);
+void CirAttrArray__remove(CirAttrArray *, const CirAttr *const *srcA, size_t lenA, const CirAttr *const *removeB, size_t lenB);
 #define CIRATTR_PARTITION_DEFAULT_NAME 0
 #define CIRATTR_PARTITION_DEFAULT_FUN 1
 #define CIRATTR_PARTITION_DEFAULT_TYPE 2
@@ -338,6 +342,7 @@ void CirAttr__logArray(const CirAttr * const *attrs, size_t numAttrs);
 CirCodeId CirBuild__mul(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__div(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__plus(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__arraySubscript(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__minus(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__call(CirCodeId target, const CirCodeId *args, size_t numArgs, const CirMachine *);
 CirCodeId CirBuild__simpleAssign(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
@@ -345,8 +350,11 @@ CirCodeId CirBuild__lt(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__le(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__gt(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__ge(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__eq(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__ne(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__if(CirCodeId cond, CirCodeId thenBlock, CirCodeId elseBlock);
 CirCodeId CirBuild__while(CirCodeId cond, CirStmtId firstStmt, CirCodeId thenCode);
+CirCodeId CirBuild__lnot(CirCodeId);
 
 size_t CirVar_getNum(void);
 size_t CirComp_getNum(void);

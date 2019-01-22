@@ -8,7 +8,13 @@
 static char strbuf[STRING_BUF_SIZE];
 static size_t strbufLen;
 
-struct CirTok cirtok;
+// The maximum number of tokens we may need to push onto the stack at any time
+#define TOK_STACK_SIZE 1
+
+CirToken cirtok;
+
+static CirToken tokenStack[TOK_STACK_SIZE];
+static size_t tokenStack_len;
 
 static CirBBuf bbuf;
 static size_t idx;
@@ -25,6 +31,13 @@ CirLex__init(const char *path, const CirMachine *mach)
     CirName filename = CirName_of(path);
     CirLog__setRealLocation(filename, 1);
     CirLog__pushLocation(filename, 1);
+}
+
+void
+CirLex__push(const CirToken *token)
+{
+    assert(tokenStack_len < TOK_STACK_SIZE);
+    tokenStack[tokenStack_len++] = *token;
 }
 
 static bool
@@ -429,6 +442,11 @@ CirLex__nextFileHash(void)
 void
 CirLex__next(void)
 {
+    if (tokenStack_len) {
+        cirtok = tokenStack[--tokenStack_len];
+        return;
+    }
+
 loop:
     if (CirLex__eof()) {
         // EOF

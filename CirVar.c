@@ -82,7 +82,7 @@ CirVar_setType(CirVarId vid, const CirType *t)
     vars[vid].type = t;
 
     // Ensure the number of formals matches the number of function args in type
-    if (CirType_isFun(t)) {
+    if (t && CirType_isFun(t)) {
         size_t numArgs = CirType_getNumParams(t);
         CirArray_alloc(&vars[vid].formals, numArgs);
         for (size_t i = vars[vid].formals.len; i < numArgs; i++)

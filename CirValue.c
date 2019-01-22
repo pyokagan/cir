@@ -4,7 +4,7 @@
 
 // data1:
 // bits 31 to 29: type
-// bits 28 to 23: ikind / number of field offsets (6 bits) [u1]
+// bits 28 to 23: number of field offsets (6 bits) [u1]
 
 // type (3 bits)
 #define CIRVALUE_INT 1
@@ -26,6 +26,7 @@ typedef struct CirValue {
 
 typedef struct CirValueInt {
     uint32_t data1;
+    const CirType *type;
     union {
         uint64_t u64;
         int64_t i64;
@@ -35,56 +36,78 @@ typedef struct CirValueInt {
 typedef struct CirValueStr {
     uint32_t data1;
     uint32_t len;
+    const CirType *type;
     const char *s;
 } CirValueStr;
 
 typedef struct CirValueVar {
     uint32_t data1;
     CirVarId vid;
+    const CirType *type;
     CirName fields[];
 } CirValueVar;
 
-const CirValue *
-CirValue_ofU64(uint32_t ikind, uint64_t val)
+static const CirValue *
+makeIntValue(uint64_t val, const CirType *type)
 {
+    assert(type); // Int values by themselves are untyped -- we need a type
     CirValueInt *out = cir__balloc(sizeof(*out));
-    out->data1 = typeToData1(CIRVALUE_INT) | u1ToData1(ikind);
+    out->data1 = typeToData1(CIRVALUE_INT);
     out->val.u64 = val;
+    out->type = type;
     return (CirValue *)out;
 }
 
-const CirValue *
-CirValue_ofI64(uint32_t ikind, int64_t val)
+static const CirValue *
+makeStrValue(const char *s, uint32_t len, const CirType *type)
 {
-    CirValueInt *out = cir__balloc(sizeof(*out));
-    out->data1 = typeToData1(CIRVALUE_INT) | u1ToData1(ikind);
-    out->val.i64 = val;
+    assert(s);
+    CirValueStr *out = cir__balloc(sizeof(*out));
+    out->data1 = typeToData1(CIRVALUE_STR);
+    out->len = len;
+    out->type = type;
+    out->s = s;
     return (CirValue *)out;
 }
 
-static CirValue *
-CirValue__ofVar(CirVarId vid, uint32_t type, const CirName *fields, size_t numFields)
+static const CirValue *
+makeVarValue(CirVarId vid, uint32_t tt, const CirName *fields, size_t numFields, const CirType *type)
 {
     if (numFields > MAX_FIELDS)
         cir_bug("too many fields");
     CirValueVar *out = cir__balloc(sizeof(*out) + sizeof(*fields) * numFields);
-    out->data1 = typeToData1(type) | u1ToData1(numFields);
+    out->data1 = typeToData1(tt) | u1ToData1(numFields);
     out->vid = vid;
+    out->type = type;
     for (size_t i = 0; i < numFields; i++)
         out->fields[i] = fields[i];
     return (CirValue *)out;
 }
 
 const CirValue *
+CirValue_ofU64(uint32_t ikind, uint64_t val)
+{
+    return makeIntValue(val, CirType_int(ikind));
+}
+
+const CirValue *
+CirValue_ofI64(uint32_t ikind, int64_t val)
+{
+    union { uint64_t u64; int64_t i64; } u;
+    u.i64 = val;
+    return makeIntValue(u.u64, CirType_int(ikind));
+}
+
+const CirValue *
 CirValue_ofVar(CirVarId vid)
 {
-    return CirValue__ofVar(vid, CIRVALUE_VAR, NULL, 0);
+    return makeVarValue(vid, CIRVALUE_VAR, NULL, 0, NULL);
 }
 
 const CirValue *
 CirValue_ofMem(CirVarId vid)
 {
-    return CirValue__ofVar(vid, CIRVALUE_MEM, NULL, 0);
+    return makeVarValue(vid, CIRVALUE_MEM, NULL, 0, NULL);
 }
 
 const CirValue *
@@ -92,26 +115,20 @@ CirValue_ofString(const char *str, size_t len)
 {
     if (len > (uint32_t)-1)
         cir_fatal("string is too long: %llu", (unsigned long long)len);
-    CirValueStr *out = cir__balloc(sizeof(*out));
-    out->data1 = typeToData1(CIRVALUE_STR);
-    out->len = len;
-    out->s = str;
-    return (CirValue *)out;
+    return makeStrValue(str, len, NULL /* no cast -- use type of string */);
 }
 
 const CirValue *
 CirValue_ofCString(const char *str)
 {
-    return CirValue_ofString(str, strlen(str));
+    return CirValue_ofString(str, strlen(str) + 1);
 }
 
-uint32_t
+bool
 CirValue_isInt(const CirValue *value)
 {
     assert(value != NULL);
-    if (data1ToType(value->data1) != CIRVALUE_INT)
-        return 0;
-    return data1ToU1(value->data1);
+    return data1ToType(value->data1) == CIRVALUE_INT;
 }
 
 bool
@@ -195,7 +212,7 @@ CirValue_withFields(const CirValue *value, const CirName *fields, size_t len)
         cir_bug("CirValue_withFields: not an lval");
     const CirValueVar *varValue = (const CirValueVar *)value;
     size_t numFields = CirValue_getNumFields(value);
-    CirValueVar *out = (CirValueVar *)CirValue__ofVar(varValue->vid, data1ToType(value->data1), varValue->fields, numFields + len);
+    CirValueVar *out = (CirValueVar *)makeVarValue(varValue->vid, data1ToType(value->data1), varValue->fields, numFields + len, varValue->type);
     for (size_t i = 0; i < len; i++)
         out->fields[numFields + i] = fields[i];
     return (const CirValue *)out;
@@ -216,21 +233,26 @@ CirValue_computeTypeAndBitsOffset(const CirValue *value, uint64_t *offset, const
     assert(value != NULL);
     uint32_t tt = data1ToType(value->data1);
     switch (tt) {
-    case CIRVALUE_INT: {
-        uint32_t ikind = data1ToU1(value->data1);
-        return CirType_int(ikind);
-    }
+    case CIRVALUE_INT:
+        return CirValue_getCastType(value);
     case CIRVALUE_STR: {
         const CirValueStr *strValue = (const CirValueStr *)value;
-        return CirType_arrayWithLen(CirType_int(CIR_ICHAR), strValue->len);
+        const CirType *castType = CirValue_getCastType(value);
+        if (castType)
+            return castType;
+        else
+            return CirType_arrayWithLen(CirType_int(CIR_ICHAR), strValue->len);
     }
     case CIRVALUE_VAR:
     case CIRVALUE_MEM: {
         const CirValueVar *varValue = (const CirValueVar *)value;
         const CirType *type = CirVar_getType(varValue->vid);
         uint64_t totalOffset = 0;
-        if (!type)
-            return NULL;
+        if (!type) {
+            if (offset)
+                *offset = (uint64_t)-1;
+            return CirValue_getCastType(value);
+        }
         if (tt == CIRVALUE_MEM) {
             type = CirType_unroll(type);
             if (!CirType_isPtr(type)) {
@@ -276,7 +298,7 @@ CirValue_computeTypeAndBitsOffset(const CirValue *value, uint64_t *offset, const
         }
         if (offset)
             *offset = totalOffset;
-        return type;
+        return CirValue_getCastType(value) ? CirValue_getCastType(value) : type;
     }
     default:
         cir_bug("CirValue_getType: unhandled type");
@@ -288,6 +310,8 @@ CirValue_computeBitsOffset(const CirValue *value, const CirMachine *mach)
 {
     uint64_t offset = 0;
     CirValue_computeTypeAndBitsOffset(value, &offset, mach);
+    if (offset == (uint64_t)-1)
+        cir_fatal("could not compute offset of unknown type");
     return offset;
 }
 
@@ -295,6 +319,56 @@ const CirType *
 CirValue_getType(const CirValue *value)
 {
     return CirValue_computeTypeAndBitsOffset(value, NULL, NULL);
+}
+
+const CirType *
+CirValue_getCastType(const CirValue *value)
+{
+    assert(value != NULL);
+    switch (data1ToType(value->data1)) {
+    case CIRVALUE_INT: {
+        const CirValueInt *intValue = (const CirValueInt *)value;
+        assert(intValue->type);
+        return intValue->type;
+    }
+    case CIRVALUE_STR: {
+        const CirValueStr *strValue = (const CirValueStr *)value;
+        return strValue->type;
+    }
+    case CIRVALUE_VAR:
+    case CIRVALUE_MEM: {
+        const CirValueVar *varValue = (const CirValueVar *)value;
+        return varValue->type;
+    }
+    default:
+        cir_bug("unreachable");
+    }
+}
+
+const CirValue *
+CirValue_withCastType(const CirValue *value, const CirType *castType)
+{
+    assert(value != NULL);
+    uint32_t tt = data1ToType(value->data1);
+    switch (tt) {
+    case CIRVALUE_INT: {
+        const CirValueInt *intValue = (const CirValueInt *)value;
+        if (!castType)
+            cir_fatal("cannot set castType to NULL for int value");
+        return makeIntValue(intValue->val.u64, castType);
+    }
+    case CIRVALUE_STR: {
+        const CirValueStr *strValue = (const CirValueStr *)value;
+        return makeStrValue(strValue->s, strValue->len, castType);
+    }
+    case CIRVALUE_VAR:
+    case CIRVALUE_MEM: {
+        const CirValueVar *varValue = (const CirValueVar *)value;
+        return makeVarValue(varValue->vid, tt, varValue->fields, CirValue_getNumFields(value), castType);
+    }
+    default:
+        cir_bug("unreachable");
+    }
 }
 
 void
@@ -308,8 +382,14 @@ CirValue_print(CirFmt printer, const CirValue *value, bool renderName)
     switch (data1ToType(value->data1)) {
     case CIRVALUE_INT: {
         const CirValueInt *intValue = (const CirValueInt *)value;
-        uint32_t ikind = data1ToU1(value->data1);
-        if (CirIkind_isSigned(ikind, &CirMachine__host))
+        assert(intValue->type);
+        // Print cast
+        CirFmt_printString(printer, "(");
+        CirType_print(printer, intValue->type, "", 0, renderName);
+        CirFmt_printString(printer, ")");
+        // Print literal (note: type could be a pointer)
+        uint32_t ikind = CirType_isInt(CirType_unroll(intValue->type));
+        if (ikind && CirIkind_isSigned(ikind, &CirMachine__host))
             CirFmt_printI64(printer, intValue->val.i64);
         else
             CirFmt_printU64(printer, intValue->val.u64);
@@ -317,6 +397,12 @@ CirValue_print(CirFmt printer, const CirValue *value, bool renderName)
     }
     case CIRVALUE_STR: {
         const CirValueStr *strValue = (const CirValueStr *)value;
+        if (strValue->type) {
+            // Print cast
+            CirFmt_printString(printer, "(");
+            CirType_print(printer, strValue->type, "", 0, renderName);
+            CirFmt_printString(printer, ")");
+        }
         bool hasNulByte = false;
         size_t len = strValue->len;
         if (len && strValue->s[len - 1] == '\0') {
@@ -330,6 +416,12 @@ CirValue_print(CirFmt printer, const CirValue *value, bool renderName)
     }
     case CIRVALUE_VAR: {
         const CirValueVar *varValue = (const CirValueVar *)value;
+        if (varValue->type) {
+            // Print cast
+            CirFmt_printString(printer, "(");
+            CirType_print(printer, varValue->type, "", 0, renderName);
+            CirFmt_printString(printer, ")");
+        }
         size_t numFields = CirValue_getNumFields(value);
         CirVar_printLval(printer, varValue->vid, renderName);
         for (size_t i = 0; i < numFields; i++) {
@@ -340,6 +432,12 @@ CirValue_print(CirFmt printer, const CirValue *value, bool renderName)
     }
     case CIRVALUE_MEM: {
         const CirValueVar *varValue = (const CirValueVar *)value;
+        if (varValue->type) {
+            // Print cast
+            CirFmt_printString(printer, "(");
+            CirType_print(printer, varValue->type, "", 0, renderName);
+            CirFmt_printString(printer, ")");
+        }
         size_t numFields = CirValue_getNumFields(value);
         if (!numFields)
             CirFmt_printString(printer, "*");

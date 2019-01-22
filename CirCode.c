@@ -471,26 +471,6 @@ truncToIkindU(uint32_t ikind, uint64_t val, const CirMachine *mach)
     }
 }
 
-#define BINOP_TEMPLATE(name) \
-    lhs = CirCode_toExpr(lhs, false); \
-    rhs = CirCode_toExpr(rhs, false); \
-    const CirValue *lhs_value = CirCode_getValue(lhs); \
-    const CirValue *rhs_value = CirCode_getValue(rhs); \
-    if (!lhs_value) \
-        cir_fatal(name ": left operand is void"); \
-    if (!rhs_value) \
-        cir_fatal(name ": right operand is void"); \
-    const CirType *lhs_type = CirValue_getType(lhs_value); \
-    const CirType *rhs_type = CirValue_getType(rhs_value); \
-    assert(lhs_type); \
-    assert(rhs_type); \
-    CirCode_append(lhs, rhs); \
-    const CirType *dst_type = CirType__arithmeticConversion(lhs_type, rhs_type, mach); \
-    if (CirValue_isLval(lhs_value) || CirValue_isLval(rhs_value)) \
-        goto runtime; \
-    else \
-        goto comptime
-
 // Performs arithmetic conversion
 #define BINARITH_TEMPLATE(name, runtime_op, comptime_expr) \
     lhs = CirCode_toExpr(lhs, false); \
@@ -513,7 +493,7 @@ truncToIkindU(uint32_t ikind, uint64_t val, const CirMachine *mach)
         CirVar_setType(dst_id, dst_type); \
         CirStmtId stmt_id = CirCode_appendNewStmt(lhs); \
         CirStmt_toBinOp(stmt_id, dst_var, runtime_op, lhs_value, rhs_value); \
-        CirCode_setValue(lhs, CirValue_ofVar(dst_id)); \
+        CirCode_setValue(lhs, dst_var); \
         return lhs; \
     } else { \
         uint32_t ikind = CirType_isInt(dst_type); \
@@ -627,6 +607,18 @@ CirBuild__simpleAssign(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     return rhs;
 }
 
+static void
+CirBuild__plusPtr(CirCodeId code_id, const CirType *ptrType, const CirValue *lhsValue, const CirValue *rhsValue)
+{
+    // TODO: Support constant ptrs (e.g. NULL ptr)
+    CirVarId dst_id = CirVar_new(code_id);
+    const CirValue *dst_var = CirValue_ofVar(dst_id);
+    CirVar_setType(dst_id, ptrType);
+    CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+    CirStmt_toBinOp(stmt_id, dst_var, CIR_BINOP_PLUS, lhsValue, rhsValue);
+    CirCode_setValue(code_id, dst_var);
+}
+
 // Handles overloaded +
 CirCodeId
 CirBuild__plus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
@@ -637,23 +629,45 @@ CirBuild__plus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     const CirValue *rhs_value = CirCode_getValue(rhs);
     const CirType *lhs_type = CirValue_getType(lhs_value);
     const CirType *rhs_type = CirValue_getType(rhs_value);
-    lhs_type = CirType_unroll(lhs_type);
-    rhs_type = CirType_unroll(rhs_type);
-    if (CirType_isArithmetic(lhs_type) && CirType_isArithmetic(rhs_type)) {
+    lhs_type = CirType_lvalConv(lhs_type);
+    rhs_type = CirType_lvalConv(rhs_type);
+    const CirType *lhs_unrolledType = lhs_type ? CirType_unroll(lhs_type) : NULL;
+    const CirType *rhs_unrolledType = rhs_type ? CirType_unroll(rhs_type) : NULL;
+    if (!lhs_unrolledType || !rhs_unrolledType)
+        goto fallback;
+    if (CirType_isArithmetic(lhs_unrolledType) && CirType_isArithmetic(rhs_unrolledType)) {
         return CirBuild__plusA(lhs, rhs, mach);
-    } else if (CirType_isPtr(lhs_type) && CirType_isInt(rhs_type)) {
-        cir_bug("TODO: CirBuild__plusPi");
-        //return CirBuild__plusPi(lhs, rhs);
-    } else if (CirType_isInt(lhs_type) && CirType_isPtr(rhs_type)) {
-        // Temporarily swap the values of the two codes,
-        // so that the stmts will be appended in the correct order (lhs first)
-        CirCode_setValue(lhs, rhs_value);
-        CirCode_setValue(rhs, lhs_value);
-        cir_bug("TODO: CirBuild__plusPi");
-        // return CirBuild__plusPi(lhs, rhs);
-    } else {
-        cir_fatal("Invalid operands to binary plus operator");
+    } else if (CirType_isPtr(lhs_unrolledType) && CirType_isInt(rhs_unrolledType)) {
+        CirCode_append(lhs, rhs);
+        CirBuild__plusPtr(lhs, lhs_type, lhs_value, rhs_value);
+        return lhs;
+    } else if (CirType_isInt(lhs_unrolledType) && CirType_isPtr(rhs_unrolledType)) {
+        CirCode_append(lhs, rhs);
+        CirBuild__plusPtr(lhs, rhs_type, lhs_value, rhs_value);
+        return lhs;
     }
+
+fallback:
+    CirCode_append(lhs, rhs);
+    CirVarId dst_id = CirVar_new(lhs);
+    const CirValue *dst_var = CirValue_ofVar(dst_id);
+    CirStmtId stmt_id = CirCode_appendNewStmt(lhs);
+    CirStmt_toBinOp(stmt_id, dst_var, CIR_BINOP_PLUS, lhs_value, rhs_value);
+    CirCode_setValue(lhs, dst_var);
+    return lhs;
+}
+
+CirCodeId
+CirBuild__arraySubscript(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    CirCodeId code_id = CirBuild__plus(lhs, rhs, mach);
+    const CirValue *value = CirCode_getValue(code_id);
+    assert(value);
+    assert(CirValue_isVar(value));
+    assert(!CirValue_getNumFields(value));
+    CirVarId var_id = CirValue_getVar(value);
+    CirCode_setValue(code_id, CirValue_ofMem(var_id));
+    return code_id;
 }
 
 // Handles overloaded -
@@ -764,6 +778,93 @@ CirBuild__ge(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     RELOP_TEMPLATE("GE", CIR_CONDOP_GE, a >= b)
 }
 
+static CirCodeId
+CirBuild__eqA(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    RELOP_TEMPLATE("EQ_A", CIR_CONDOP_EQ, a == b);
+}
+
+CirCodeId
+CirBuild__eq(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    lhs = CirCode_toExpr(lhs, false);
+    rhs = CirCode_toExpr(rhs, false);
+    const CirValue *lhs_value = CirCode_getValue(lhs);
+    if (!lhs_value)
+        cir_fatal("eq: lhs has no value");
+    const CirValue *rhs_value = CirCode_getValue(rhs);
+    if (!rhs_value)
+        cir_fatal("eq: rhs has no value");
+    const CirType *lhs_type = CirValue_getType(lhs_value);
+    const CirType *rhs_type = CirValue_getType(rhs_value);
+    if (lhs_type && rhs_type && CirType_isArithmetic(lhs_type) && CirType_isArithmetic(rhs_type)) {
+        return CirBuild__eqA(lhs, rhs, mach);
+    } else {
+        CirCode_append(lhs, rhs);
+        CirCode__toEmptyCond(lhs);
+        CirStmtId stmt_id = CirCode_appendNewStmt(lhs);
+        CirStmt_toCmp(stmt_id, CIR_CONDOP_EQ, lhs_value, rhs_value, 0);
+        CirCode_addTrueJump(lhs, stmt_id);
+        stmt_id = CirCode_appendNewStmt(lhs);
+        CirStmt_toGoto(stmt_id, 0);
+        CirCode_addFalseJump(lhs, stmt_id);
+        return lhs;
+    }
+}
+
+static CirCodeId
+CirBuild__neA(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    RELOP_TEMPLATE("NE_A", CIR_CONDOP_NE, a != b);
+}
+
+CirCodeId
+CirBuild__ne(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    lhs = CirCode_toExpr(lhs, false);
+    rhs = CirCode_toExpr(rhs, false);
+    const CirValue *lhs_value = CirCode_getValue(lhs);
+    if (!lhs_value)
+        cir_fatal("ne: lhs has no value");
+    const CirValue *rhs_value = CirCode_getValue(rhs);
+    if (!rhs_value)
+        cir_fatal("ne: rhs has no value");
+    const CirType *lhs_type = CirValue_getType(lhs_value);
+    const CirType *rhs_type = CirValue_getType(rhs_value);
+    if (lhs_type && rhs_type && CirType_isArithmetic(lhs_type) && CirType_isArithmetic(rhs_type)) {
+        return CirBuild__neA(lhs, rhs, mach);
+    } else {
+        CirCode_append(lhs, rhs);
+        CirCode__toEmptyCond(lhs);
+        CirStmtId stmt_id = CirCode_appendNewStmt(lhs);
+        CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, lhs_value, rhs_value, 0);
+        CirCode_addTrueJump(lhs, stmt_id);
+        stmt_id = CirCode_appendNewStmt(lhs);
+        CirStmt_toGoto(stmt_id, 0);
+        CirCode_addFalseJump(lhs, stmt_id);
+        return lhs;
+    }
+}
+
+static void
+toCond(CirCodeId code_id, CirStmtId *firstStmt)
+{
+    assert(CirCode_isExpr(code_id));
+    // Need to generate a runtime cmp
+    const CirValue *value = CirCode_getValue(code_id);
+    if (!value)
+        cir_fatal("toCond: no value");
+    CirCode__toEmptyCond(code_id);
+    CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+    CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, value, CirValue_ofI64(CIR_IINT, 0), 0);
+    if (firstStmt)
+        *firstStmt = stmt_id;
+    CirCode_addTrueJump(code_id, stmt_id);
+    stmt_id = CirCode_appendNewStmt(code_id);
+    CirStmt_toGoto(stmt_id, 0);
+    CirCode_addFalseJump(code_id, stmt_id);
+}
+
 CirCodeId
 CirBuild__if(CirCodeId condCode, CirCodeId thenCode, CirCodeId elseCode)
 {
@@ -794,14 +895,7 @@ CirBuild__if(CirCodeId condCode, CirCodeId thenCode, CirCodeId elseCode)
             }
         }
 
-        // Need to generate a runtime cmp
-        CirCode__toEmptyCond(condCode);
-        CirStmtId stmt_id = CirCode_appendNewStmt(condCode);
-        CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, value, CirValue_ofI64(CIR_IINT, 0), 0);
-        CirCode_addTrueJump(condCode, stmt_id);
-        stmt_id = CirCode_appendNewStmt(condCode);
-        CirStmt_toGoto(stmt_id, 0);
-        CirCode_addFalseJump(condCode, stmt_id);
+        toCond(condCode, NULL);
         // Fallthrough to the rest of the code to process the condCode
     }
 
@@ -891,16 +985,7 @@ CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
             return condCode;
         }
 
-        // Need to generate a runtime cmp
-        CirCode__toEmptyCond(condCode);
-        CirStmtId stmt_id = CirCode_appendNewStmt(condCode);
-        CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, value, CirValue_ofI64(CIR_IINT, 0), 0);
-        if (!firstStmt)
-            firstStmt = stmt_id;
-        CirCode_addTrueJump(condCode, stmt_id);
-        stmt_id = CirCode_appendNewStmt(condCode);
-        CirStmt_toGoto(stmt_id, 0);
-        CirCode_addFalseJump(condCode, stmt_id);
+        toCond(condCode, firstStmt ? NULL : &firstStmt);
         // Fallthrough to the rest of the code to process the condCode
     }
 
@@ -925,5 +1010,36 @@ CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
     assert(codes[condCode].truejumps.len == 0);
     assert(codes[condCode].falsejumps.len == 0);
     condCode = CirCode_toExpr(condCode, true);
+    return condCode;
+}
+
+CirCodeId
+CirBuild__lnot(CirCodeId condCode)
+{
+    assert(condCode);
+
+    // The type of code we generate depends on whether condCode is a constant
+    if (CirCode_isExpr(condCode)) {
+        const CirValue *value = CirCode_getValue(condCode);
+        if (!value)
+            cir_fatal("lnot: conditional expression has no value");
+
+        // Is this a constant?
+        if (CirValue_isInt(value)) {
+            uint64_t val = CirValue_getU64(value);
+            CirCode_setValue(condCode, CirValue_ofI64(CIR_IINT, !val));
+            return condCode;
+        }
+
+        toCond(condCode, NULL);
+        // Fallthrough to the rest of the code to process the condCode
+    }
+
+    // Swap truejumps/falsejumps
+    {
+        CirStmtIdArray tmp = codes[condCode].truejumps;
+        codes[condCode].truejumps = codes[condCode].falsejumps;
+        codes[condCode].falsejumps = tmp;
+    }
     return condCode;
 }

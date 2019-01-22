@@ -189,6 +189,33 @@ CirAttrArray__merge(CirAttrArray *arr, const CirAttr * const *srcA, size_t lenA,
     arr->len = i;
 }
 
+void
+CirAttrArray__remove(CirAttrArray *arr, const CirAttr *const *srcA, size_t lenA, const CirAttr *const *removeB, size_t lenB)
+{
+    size_t aIdx = 0, bIdx = 0, i = 0;
+
+    CirArray_alloc(arr, lenA);
+    while (aIdx < lenA && bIdx < lenB) {
+        CirName nameA = CirAttr_getName(srcA[aIdx]);
+        CirName nameB = CirAttr_getName(removeB[bIdx]);
+        if (nameA < nameB) {
+            // Can add nameA
+            arr->items[i++] = srcA[aIdx];
+            aIdx++;
+        } else if (nameA == nameB) {
+            // Don't add nameA
+            aIdx++;
+        } else { // nameA > nameB
+            bIdx++;
+        }
+    }
+    // Add the rest
+    while (aIdx < lenA)
+        arr->items[i++] = srcA[aIdx++];
+    assert(i <= arr->alloc);
+    arr->len = i;
+}
+
 static bool
 isNameAttr(CirName name)
 {

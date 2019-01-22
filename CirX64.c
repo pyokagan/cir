@@ -288,6 +288,19 @@ emitSIB(uint8_t scale, uint8_t index, uint8_t base)
     emitU8(val);
 }
 
+// emit LEA dstReg, [baseReg + indexReg * (2 ** scale)]
+static void
+emitLea(unsigned dstReg, unsigned baseReg, unsigned indexReg, unsigned scale)
+{
+    assert(dstReg < 16); assert(baseReg < 16); assert(indexReg < 16); assert(scale < 4);
+    assert(baseReg != REG_RBP && baseReg != REG_R13); // We don't support this encoding yet
+    assert(indexReg != REG_RSP); // We don't support this encoding yet
+    emitREX(1, dstReg > 7, indexReg > 7, baseReg > 7);
+    emitU8(0x8d);
+    emitModRM(0, dstReg & 0x07, 4 /* use SIB byte */);
+    emitSIB(scale, indexReg & 0x07, baseReg & 0x07);
+}
+
 // emit [srcReg64 + disp]
 static void
 emitMemDisp(unsigned dstReg64, unsigned srcReg64, int32_t disp)
@@ -339,6 +352,20 @@ emitSub64(unsigned dstReg64, unsigned srcReg64)
     emitREX(1, dstReg64 > 7, 0, srcReg64 > 7);
     emitU8(0x2B);
     emitModRM(3, dstReg64 & 0x07, srcReg64 & 0x07);
+}
+
+static void
+emitMulImm32(unsigned dstReg, unsigned srcReg, int32_t imm)
+{
+    assert(dstReg < 16); assert(srcReg < 16);
+    bool fitsInOneByte = imm >= SCHAR_MIN && imm <= SCHAR_MAX;
+    emitREX(1, dstReg > 7, 0, srcReg > 7);
+    emitU8(fitsInOneByte ? 0x6b : 0x69);
+    emitModRM(3, dstReg & 0x07, srcReg & 0x07);
+    if (fitsInOneByte)
+        emitI8(imm);
+    else
+        emitI32(imm);
 }
 
 // Move immediate value into register
@@ -489,8 +516,7 @@ emitLoadIkind(uint32_t ikind, unsigned dstReg, unsigned memReg, int32_t disp)
 static void
 emitLoad(unsigned dstReg, const CirValue *value)
 {
-    uint32_t ikind = CirValue_isInt(value);
-    if (ikind) {
+    if (CirValue_isInt(value)) {
         // TODO: maybe use appropriate encoding based on imm
         emitMovImmU64(dstReg, CirValue_getU64(value));
         return;
@@ -515,28 +541,53 @@ emitLoad(unsigned dstReg, const CirValue *value)
         cir_fatal("field offset too large");
     int32_t fieldOffset = bitsOffset;
 
-    ikind = CirType_isInt(type);
+    uint32_t ikind = CirType_isInt(type);
     if (CirType_isPtr(type))
         ikind = CIR_IULONG;
-    if (!ikind)
-        cir_bug("emitLoad called on non-int/ptr var");
 
     if (deref) {
         // First we need to load the address from var
         emitLoad(dstReg, CirValue_ofVar(var_id));
 
         // Then we load the value
-        emitLoadIkind(ikind, dstReg, dstReg, fieldOffset);
+        if (ikind)
+            emitLoadIkind(ikind, dstReg, dstReg, fieldOffset);
+        else if (CirType_isArray(type))
+            emitAddImmI32(dstReg, fieldOffset);
+        else
+            cir_fatal("emitLoad called on non-int/ptr/array var");
     } else if (varinfo->allocStatus == ALLOC_STACK) {
-        emitLoadIkind(ikind, dstReg, REG_RSP, varinfo->offset);
+        if (ikind) {
+            emitLoadIkind(ikind, dstReg, REG_RSP, varinfo->offset);
+        } else if (CirType_isArray(type)) {
+            // TODO: Probably can optimize into a single instruction
+            emitMovReg64(dstReg, REG_RSP);
+            emitAddImmI32(dstReg, varinfo->offset);
+        } else {
+            cir_fatal("emitLoad called on non-int/ptr/array var");
+        }
     } else if (varinfo->allocStatus == ALLOC_GLOBAL) {
-        emitLoadIkind(ikind, dstReg, REG_GLOBAL_BASE, varinfo->offset);
+        if (ikind) {
+            emitLoadIkind(ikind, dstReg, REG_GLOBAL_BASE, varinfo->offset);
+        } else if (CirType_isArray(type)) {
+            // TODO: Probably can optimize into a single instruction
+            emitMovReg64(dstReg, REG_GLOBAL_BASE);
+            emitAddImmI32(dstReg, varinfo->offset);
+        } else {
+            cir_fatal("emitLoad called on non-int/ptr/array var");
+        }
     } else {
         assert(varinfo->allocStatus == ALLOC_EXTERNAL);
         uint64_t ptr = (uint64_t)varinfo->ptr;
         ptr += fieldOffset;
-        emitMovImmU64(dstReg, ptr);
-        emitLoadIkind(ikind, dstReg, dstReg, 0);
+        if (ikind) {
+            emitMovImmU64(dstReg, ptr);
+            emitLoadIkind(ikind, dstReg, dstReg, 0);
+        } else if (CirType_isArray(type)) {
+            emitMovImmU64(dstReg, ptr);
+        } else {
+            cir_fatal("emitLoad called on non-int/ptr/array var");
+        }
     }
 }
 
@@ -694,11 +745,11 @@ emitStore(const CirValue *value, unsigned srcReg)
     int32_t fieldOffset = bitsOffset;
 
     uint32_t ikind = CirType_isInt(type);
-    if (CirType_isPtr(type) || CirType_isArray(type))
+    if (CirType_isPtr(type))
         ikind = CIR_IULONG;
     if (!ikind) {
         CirLog_begin(CIRLOG_BUG);
-        CirLog_print("emitStore called on non-int/ptr/array var: ");
+        CirLog_print("emitStore called on non-int/ptr var: ");
         CirVar_logNameAndType(var_id);
         CirLog_end();
         abort();
@@ -772,8 +823,110 @@ emitCmp(unsigned reg1, unsigned reg2)
 // =====
 
 static void
+emitAddPtrInt(const CirValue *dst, const CirValue *ptrValue, const CirType *ptrType, const CirValue *intValue, const CirType *intType)
+{
+    static unsigned sizeToFactor[] = { [1] = 0, [2] = 1, [4] = 2, [8] = 3 };
+    // Code sequence depends on whether the size of each element is in {1, 2, 4, 8}.
+    const CirType *baseType = CirType_getBaseType(ptrType);
+    uint64_t baseTypeSize = CirType_sizeof(baseType, &CirMachine__build);
+    if (CirValue_isInt(intValue)) {
+        // Can use ADD + pre-computed offset
+        uint32_t ikind = CirType_isInt(CirType_unroll(intType));
+        assert(ikind);
+        emitLoad(REG_OPERAND1, ptrValue);
+        int32_t imm;
+        if (CirIkind_isSigned(ikind, &CirMachine__build)) {
+            int64_t val = CirValue_getI64(intValue) * baseTypeSize;
+            assert(val >= INT_MIN && val <= INT_MAX);
+            imm = val;
+        } else {
+            uint64_t val = CirValue_getU64(intValue) * baseTypeSize;
+            assert(val <= INT_MAX);
+            imm = val;
+        }
+        emitAddImmI32(REG_OPERAND1, imm);
+        emitStore(dst, REG_OPERAND1);
+    } else if (baseTypeSize == 1) {
+        // Can use ADD
+        emitLoad(REG_OPERAND1, ptrValue);
+        emitLoad(REG_OPERAND2, intValue);
+        emitAdd64(REG_OPERAND1, REG_OPERAND2);
+        emitStore(dst, REG_OPERAND1);
+    } else if (baseTypeSize == 2 || baseTypeSize == 4 || baseTypeSize == 8) {
+        // Can use LEA
+        emitLoad(REG_OPERAND1, ptrValue);
+        emitLoad(REG_OPERAND2, intValue);
+        emitLea(REG_OPERAND1, REG_OPERAND1, REG_OPERAND2, sizeToFactor[baseTypeSize]);
+        emitStore(dst, REG_OPERAND1);
+    } else {
+        // Compute offset manually
+        assert(baseTypeSize <= INT_MAX);
+        emitLoad(REG_OPERAND1, ptrValue);
+        emitLoad(REG_OPERAND2, intValue);
+        emitMulImm32(REG_OPERAND2, REG_OPERAND2, baseTypeSize);
+        emitAdd64(REG_OPERAND1, REG_OPERAND2);
+        emitStore(dst, REG_OPERAND1);
+    }
+}
+
+static void
+emitBinop(CirStmtId stmt_id)
+{
+    assert(CirStmt_isBinOp(stmt_id));
+    uint32_t op = CirStmt_getOp(stmt_id);
+    const CirValue *dst = CirStmt_getDst(stmt_id);
+    const CirValue *operand1 = CirStmt_getOperand1(stmt_id);
+    const CirValue *operand2 = CirStmt_getOperand2(stmt_id);
+    if (!operand1)
+        cir_fatal("emitBinop: operand1 has no value");
+    if (!operand2)
+        cir_fatal("emitBinop: operand2 has no value");
+    const CirType *operand1Type = CirValue_getType(operand1);
+    if (!operand1Type)
+        cir_fatal("emitBinop: operand1 has no type");
+    const CirType *operand2Type = CirValue_getType(operand2);
+    if (!operand2Type)
+        cir_fatal("emitBinop: operand2 has no type");
+    operand1Type = CirType_lvalConv(operand1Type);
+    operand2Type = CirType_lvalConv(operand2Type);
+    // Perform operation
+    switch (op) {
+    case CIR_BINOP_PLUS: {
+        // Depends on the type of the operands
+        const CirType *operand1UnrolledType = CirType_unroll(operand1Type);
+        const CirType *operand2UnrolledType = CirType_unroll(operand2Type);
+        uint32_t ikind;
+        if (CirType_isArithmetic(operand1UnrolledType) && CirType_isArithmetic(operand2UnrolledType)) {
+            // TODO: support floats here
+            emitLoad(REG_OPERAND1, operand1);
+            emitLoad(REG_OPERAND2, operand2);
+            emitAdd64(REG_OPERAND1, REG_OPERAND2);
+            emitStore(dst, REG_OPERAND1);
+        } else if (CirType_isPtr(operand1UnrolledType) && (ikind = CirType_isInt(operand2UnrolledType))) {
+            // ptr + int
+            emitAddPtrInt(dst, operand1, operand1UnrolledType, operand2, operand2UnrolledType);
+        } else if ((ikind = CirType_isInt(operand1UnrolledType)) && CirType_isPtr(operand2UnrolledType)) {
+            // int + ptr
+            emitAddPtrInt(dst, operand2, operand2Type, operand1, operand1Type);
+        } else {
+            cir_fatal("CIR_BINOP_PLUS: invalid operand types");
+        }
+        break;
+    }
+    default:
+        cir_bug("TODO: binop");
+    }
+}
+
+static void
 doCompile(CirVarId var_id)
 {
+#if 0
+    CirLog_begin(CIRLOG_DEBUG);
+    CirCode_dump(CirVar_getCode(var_id));
+    CirLog_end();
+#endif
+
     // var should be a function
     const CirType *type = CirVar_getType(var_id);
     assert(type);
@@ -875,23 +1028,7 @@ doCompile(CirVarId var_id)
                 cir_bug("TODO: unop");
             }
         } else if (CirStmt_isBinOp(stmt_id)) {
-            uint32_t op = CirStmt_getOp(stmt_id);
-            const CirValue *dst = CirStmt_getDst(stmt_id);
-            const CirValue *operand1 = CirStmt_getOperand1(stmt_id);
-            const CirValue *operand2 = CirStmt_getOperand2(stmt_id);
-            // Load operands
-            emitLoad(REG_OPERAND1, operand1);
-            emitLoad(REG_OPERAND2, operand2);
-            // Perform operation
-            switch (op) {
-            case CIR_BINOP_PLUS:
-                emitAdd64(REG_OPERAND1, REG_OPERAND2);
-                break;
-            default:
-                cir_bug("TODO: binop");
-            }
-            // Store result
-            emitStore(dst, REG_OPERAND1);
+            emitBinop(stmt_id);
         } else if (CirStmt_isCall(stmt_id)) {
             const CirValue *dst = CirStmt_getDst(stmt_id);
             const CirValue *target = CirStmt_getOperand1(stmt_id);
@@ -1168,8 +1305,7 @@ intToCode(uint32_t ikind, uint64_t val)
 static uint64_t
 readValue(const CirValue *value)
 {
-    uint32_t ikind = CirValue_isInt(value);
-    if (ikind) {
+    if (CirValue_isInt(value)) {
         return CirValue_getU64(value);
     } else if (CirValue_isString(value)) {
         return (uint64_t)CirValue_getString(value);

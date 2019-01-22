@@ -38,7 +38,20 @@ typedef struct CirParse__ProcessedSpec {
     uint8_t storage; // storage kind
     bool isInline; // inline
     bool isTypedef; // typedef
+    CirAttrArray attrArray;
 } CirParse__ProcessedSpec;
+
+static void
+CirParse__ProcessedSpec_init(CirParse__ProcessedSpec *pspec)
+{
+    CirArray_init(&pspec->attrArray);
+}
+
+static void
+CirParse__ProcessedSpec_release(CirParse__ProcessedSpec *pspec)
+{
+    CirArray_release(&pspec->attrArray);
+}
 
 // Declarator item
 typedef CirArray(CirFunParam) CirFunParamArray;
@@ -64,6 +77,7 @@ static void comp_field_declaration(CirCompId);
 static const CirType *type_name(int);
 static CirCodeId comma_expression(void);
 static CirCodeId expression(void);
+static CirCodeId block(bool dropValue);
 
 static void
 CirParse__DeclArray_release(CirParse__DeclArray *arr)
@@ -205,19 +219,19 @@ attr(void)
 }
 
 static bool
-attribute_list_FIRST(bool with_asm)
+attribute_list_FIRST(bool with_asm, bool with_cv)
 {
     return cirtok.type == CIRTOK_ATTRIBUTE ||
-            cirtok.type == CIRTOK_CONST ||
-            cirtok.type == CIRTOK_RESTRICT ||
-            cirtok.type == CIRTOK_VOLATILE ||
+            (with_cv && cirtok.type == CIRTOK_CONST) ||
+            (with_cv && cirtok.type == CIRTOK_RESTRICT) ||
+            (with_cv && cirtok.type == CIRTOK_VOLATILE) ||
             (with_asm && cirtok.type == CIRTOK_ASM);
 }
 
 static void
-attribute_list(CirAttrArray *out, bool with_asm)
+attribute_list(CirAttrArray *out, bool with_asm, bool with_cv)
 {
-    assert(attribute_list_FIRST(with_asm));
+    assert(attribute_list_FIRST(with_asm, with_cv));
 
 loop:
     if (cirtok.type == CIRTOK_ATTRIBUTE) {
@@ -251,17 +265,17 @@ attribute_finish:
             unexpected_token("__attribute__", "`)`");
         CirLex__next();
         goto loop;
-    } else if (cirtok.type == CIRTOK_CONST) {
+    } else if (with_cv && cirtok.type == CIRTOK_CONST) {
         CirLex__next();
         const CirAttr *attr = CirAttr_name(CirName_of("const"));
         CirAttrArray__add(out, attr);
         goto loop;
-    } else if ( cirtok.type == CIRTOK_RESTRICT) {
+    } else if (with_cv && cirtok.type == CIRTOK_RESTRICT) {
         CirLex__next();
         const CirAttr *attr = CirAttr_name(CirName_of("restrict"));
         CirAttrArray__add(out, attr);
         goto loop;
-    } else if (cirtok.type == CIRTOK_VOLATILE) {
+    } else if (with_cv && cirtok.type == CIRTOK_VOLATILE) {
         CirLex__next();
         const CirAttr *attr = CirAttr_name(CirName_of("volatile"));
         CirAttrArray__add(out, attr);
@@ -382,13 +396,25 @@ build_function_call:
         return code_id;
     }
     case CIRTOK_LPAREN: {
-        // comma_expression
-        CirLex__next();
-        CirCodeId code_id = comma_expression();
-        if (cirtok.type != CIRTOK_RPAREN)
-            unexpected_token("primary_expression", "`)`");
-        CirLex__next();
-        return code_id;
+        // comma expression or statement expression
+        CirLex__next(); // consume LPAREN
+        if (cirtok.type == CIRTOK_LBRACE) {
+            // statement expression
+            CirEnv__pushScope();
+            CirCodeId code_id = block(false);
+            CirEnv__popScope();
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("primary_expression", "`)`");
+            CirLex__next(); // consume RPAREN
+            return code_id;
+        } else {
+            // comma expression
+            CirCodeId code_id = comma_expression();
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("primary_expression", "`)`");
+            CirLex__next(); // consume RPAREN
+            return code_id;
+        }
     }
     default:
         unexpected_token("primary_expression", "INTLIT, STRINGLIT, IDENT, `(`");
@@ -416,6 +442,18 @@ loop:
         assert(fields.len > 0);
 
         const CirValue *value = CirCode_getValue(lhs_id);
+        if (!value)
+            cir_fatal("dot: operand has no value");
+        const CirType *castType = CirValue_getCastType(value);
+        if (castType) {
+            // Save value to temporary with the type of the cast
+            CirVarId tempVar = CirVar_new(lhs_id);
+            CirVar_setType(tempVar, castType);
+            CirStmtId assign_stmt_id = CirCode_appendNewStmt(lhs_id);
+            const CirValue *newValue = CirValue_ofVar(tempVar);
+            CirStmt_toUnOp(assign_stmt_id, newValue, CIR_UNOP_IDENTITY, value);
+            value = newValue;
+        }
         CirCode_setValue(lhs_id, CirValue_withFields(value, fields.items, fields.len));
         CirArray_release(&fields);
         goto loop;
@@ -425,7 +463,7 @@ loop:
         if (cirtok.type != CIRTOK_IDENT && cirtok.type != CIRTOK_TYPENAME)
             unexpected_token("arrow", "`IDENT`, `TYPENAME`");
         const CirValue *value = CirCode_getValue(lhs_id);
-        if (CirValue_isVar(value) && !CirValue_getNumFields(value)) {
+        if (CirValue_isVar(value) && !CirValue_getNumFields(value) && !CirValue_getCastType(value)) {
             // Convert to mem
             value = CirValue_ofMem(CirValue_getVar(value));
             value = CirValue_withFields(value, &cirtok.data.name, 1);
@@ -440,6 +478,15 @@ loop:
         }
         CirCode_setValue(lhs_id, value);
         CirLex__next();
+        goto loop;
+    }
+    case CIRTOK_LBRACKET: { // array subscript
+        CirLex__next(); // consume LBRACKET
+        CirCodeId rhs_id = comma_expression();
+        if (cirtok.type != CIRTOK_RBRACKET)
+            unexpected_token("array subscript", "`]`");
+        CirLex__next(); // consume RBRACKET
+        lhs_id = CirBuild__arraySubscript(lhs_id, rhs_id, CirParse__mach);
         goto loop;
     }
     case CIRTOK_LPAREN: {
@@ -482,7 +529,7 @@ static CirCodeId
 unary_expression(void)
 {
     switch (cirtok.type) {
-    case CIRTOK_SIZEOF:
+    case CIRTOK_SIZEOF: {
         CirLex__next();
         const CirType *t;
         if (cirtok.type == CIRTOK_LPAREN) {
@@ -509,6 +556,12 @@ unary_expression(void)
         uint64_t size = CirType_sizeof(t, CirParse__mach);
         uint32_t ikind = CirIkind_fromSize(CirParse__mach->sizeofSizeT, true, CirParse__mach);
         return CirCode_ofExpr(CirValue_ofU64(ikind, size));
+    }
+    case CIRTOK_EXCLAM: { // NOT
+        CirLex__next();
+        CirCodeId code_id = unary_expression();
+        return CirBuild__lnot(code_id);
+    }
     default:
         return postfix_expression();
     }
@@ -517,7 +570,43 @@ unary_expression(void)
 static CirCodeId
 cast_expression(void)
 {
-    return unary_expression();
+    if (cirtok.type == CIRTOK_LPAREN) {
+        // cast or comma expression or statement expression
+        CirLex__next(); // consume LPAREN
+        if (decl_spec_list_FIRST()) {
+            // cast
+            const CirType *type = type_name(CIRTOK_RPAREN);
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("cast_expression", "`)`");
+            CirLex__next(); // consume RPAREN
+            CirCodeId code_id = cast_expression();
+            code_id = CirCode_toExpr(code_id, false);
+            const CirValue *value = CirCode_getValue(code_id);
+            if (!value)
+                cir_fatal("cast_expression: rhs has no value");
+            value = CirValue_withCastType(value, type);
+            CirCode_setValue(code_id, value);
+            return code_id;
+        } else if (cirtok.type == CIRTOK_LBRACE) {
+            // statement expression
+            CirEnv__pushScope();
+            CirCodeId code_id = block(false);
+            CirEnv__popScope();
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("cast_expression", "`)`");
+            CirLex__next(); // consume RPAREN
+            return code_id;
+        } else {
+            // comma expression
+            CirCodeId code_id = comma_expression();
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("cast_expression", "`)`");
+            CirLex__next(); // consume RPAREN
+            return code_id;
+        }
+    } else {
+        return unary_expression();
+    }
 }
 
 static CirCodeId
@@ -597,6 +686,16 @@ loop:
         CirLex__next();
         rhs_id = shift_expression();
         lhs_id = CirBuild__gt(lhs_id, rhs_id, CirParse__mach);
+        goto loop;
+    case CIRTOK_EQ_EQ: // ==
+        CirLex__next();
+        rhs_id = shift_expression();
+        lhs_id = CirBuild__eq(lhs_id, rhs_id, CirParse__mach);
+        goto loop;
+    case CIRTOK_EXCLAM_EQ: // !=
+        CirLex__next();
+        rhs_id = shift_expression();
+        lhs_id = CirBuild__ne(lhs_id, rhs_id, CirParse__mach);
         goto loop;
     default:
         return lhs_id;
@@ -713,11 +812,9 @@ comma_expression(void)
     return code;
 }
 
-static CirCodeId block(void);
-
 // Pre/Post-condition: !blockCode || CirCode_isExpr(blockCode)
 static CirCodeId
-statement(CirCodeId blockCode)
+statement(CirCodeId blockCode, bool dropValue)
 {
     assert(!blockCode || CirCode_isExpr(blockCode));
 
@@ -729,7 +826,7 @@ statement(CirCodeId blockCode)
     case CIRTOK_LBRACE: {
         // Nested block
         CirEnv__pushScope();
-        CirCodeId nestedBlock = block();
+        CirCodeId nestedBlock = block(dropValue);
         assert(!nestedBlock || CirCode_isExpr(nestedBlock));
         CirEnv__popScope();
         if (!blockCode)
@@ -751,7 +848,7 @@ statement(CirCodeId blockCode)
             return blockCode;
         }
         CirCodeId exprCode = comma_expression();
-        assert(CirCode_isExpr(exprCode));
+        exprCode = CirCode_toExpr(exprCode, false);
         if (cirtok.type != CIRTOK_SEMICOLON)
             unexpected_token("block_return_expression", "`;`");
         CirLex__next();
@@ -779,11 +876,11 @@ statement(CirCodeId blockCode)
             blockCode = condCode;
         else
             CirCode_append(blockCode, condCode);
-        CirCodeId thenCode = statement(0);
+        CirCodeId thenCode = statement(0, true);
         CirCodeId elseCode = 0;
         if (cirtok.type == CIRTOK_ELSE) {
             CirLex__next(); // consume ELSE
-            elseCode = statement(0);
+            elseCode = statement(0, true);
         }
         blockCode = CirBuild__if(blockCode, thenCode, elseCode);
         assert(CirCode_isExpr(blockCode));
@@ -804,7 +901,7 @@ statement(CirCodeId blockCode)
             blockCode = condCode;
         else
             CirCode_append(blockCode, condCode);
-        CirCodeId thenCode = statement(0);
+        CirCodeId thenCode = statement(0, true);
         blockCode = CirBuild__while(blockCode, firstStmt, thenCode);
         assert(CirCode_isExpr(blockCode));
         return blockCode;
@@ -812,7 +909,7 @@ statement(CirCodeId blockCode)
     default: {
         // comma_expression
         CirCodeId exprCode = comma_expression();
-        exprCode = CirCode_toExpr(exprCode, true);
+        exprCode = CirCode_toExpr(exprCode, dropValue);
         if (cirtok.type != CIRTOK_SEMICOLON)
             unexpected_token("block_expression", "`;`");
         CirLex__next();
@@ -828,7 +925,7 @@ statement(CirCodeId blockCode)
 
 // Post-condition: !blockCode || CirCode_isExpr(blockCode)
 static CirCodeId
-block(void)
+block(bool dropValue)
 {
     if (cirtok.type != CIRTOK_LBRACE)
         unexpected_token("block", "`{`");
@@ -841,14 +938,12 @@ block(void)
                 blockCode = CirCode_ofExpr(NULL);
             declaration_or_function_definition(blockCode);
         } else {
-            blockCode = statement(blockCode);
+            blockCode = statement(blockCode, dropValue);
         }
     }
     assert(cirtok.type == CIRTOK_RBRACE);
     CirLex__next();
     assert(!blockCode || CirCode_isExpr(blockCode));
-    if (blockCode)
-        CirCode_setValue(blockCode, NULL);
     return blockCode;
 }
 
@@ -878,7 +973,9 @@ decl_spec_list_FIRST(void)
         cirtok.type == CIRTOK_TYPENAME ||
         cirtok.type == CIRTOK_AUTO_TYPE ||
         cirtok.type == CIRTOK_STRUCT ||
-        cirtok.type == CIRTOK_UNION;
+        cirtok.type == CIRTOK_UNION ||
+        // attribute_nocv
+        attribute_list_FIRST(false, false);
 }
 
 static int
@@ -941,15 +1038,14 @@ declareComp(CirName name, bool isStruct)
     }
 }
 
-static CirParse__ProcessedSpec
-decl_spec_list(void)
+static void
+decl_spec_list(CirParse__ProcessedSpec *pspec)
 {
     CirParse__TypeSpecArray typeSpecs = CIRARRAY_INIT;
     CirParse__TypeSpecItem typeSpec;
-    CirParse__ProcessedSpec out;
-    out.storage = CIR_NOSTORAGE;
-    out.isInline = false;
-    out.isTypedef = false;
+    pspec->storage = CIR_NOSTORAGE;
+    pspec->isInline = false;
+    pspec->isTypedef = false;
     bool seenTypeName = false;
     bool seenStorage = false;
     bool isStruct;
@@ -962,7 +1058,12 @@ loop:
     // typedef
     case CIRTOK_TYPEDEF:
         CirLex__next();
-        out.isTypedef = true;
+        pspec->isTypedef = true;
+        goto loop;
+
+    // attr
+    case CIRTOK_ATTRIBUTE:
+        attribute_list(&pspec->attrArray, false, false);
         goto loop;
 
     // storage
@@ -970,35 +1071,35 @@ loop:
         CirLex__next();
         if (seenStorage)
             cir_fatal("multiple storage specifiers");
-        out.storage = CIR_EXTERN;
+        pspec->storage = CIR_EXTERN;
         seenStorage = true;
         goto loop;
     case CIRTOK_STATIC:
         CirLex__next();
         if (seenStorage)
             cir_fatal("multiple storage specifiers");
-        out.storage = CIR_STATIC;
+        pspec->storage = CIR_STATIC;
         seenStorage = true;
         goto loop;
     case CIRTOK_AUTO:
         CirLex__next();
         if (seenStorage)
             cir_fatal("multiple storage specifiers");
-        out.storage = CIR_NOSTORAGE;
+        pspec->storage = CIR_NOSTORAGE;
         seenStorage = true;
         goto loop;
     case CIRTOK_REGISTER:
         CirLex__next();
         if (seenStorage)
             cir_fatal("multiple storage specifiers");
-        out.storage = CIR_REGISTER;
+        pspec->storage = CIR_REGISTER;
         seenStorage = true;
         goto loop;
 
     // inline
     case CIRTOK_INLINE:
         CirLex__next();
-        out.isInline = true;
+        pspec->isInline = true;
         goto loop;
 
     // cvspecs
@@ -1141,61 +1242,61 @@ finish:
 #define C4(a, b, c, d) (typeSpecs.len == 4 && typeSpecs.items[0].type == (a) && typeSpecs.items[1].type == (b) && typeSpecs.items[2].type == (c) && typeSpecs.items[3].type == (d))
 
     if (C1(CIRPARSE_TVOID)) {
-        out.baseType = CirType_void();
+        pspec->baseType = CirType_void();
     } else if (C1(CIRPARSE_TCHAR)) {
-        out.baseType = CirType_int(CIR_ICHAR);
+        pspec->baseType = CirType_int(CIR_ICHAR);
     } else if (C1(CIRPARSE_TBOOL)) {
-        out.baseType = CirType_int(CIR_IBOOL);
+        pspec->baseType = CirType_int(CIR_IBOOL);
     } else if (C2(CIRPARSE_TSIGNED, CIRPARSE_TCHAR)) {
-        out.baseType = CirType_int(CIR_ISCHAR);
+        pspec->baseType = CirType_int(CIR_ISCHAR);
     } else if (C2(CIRPARSE_TUNSIGNED, CIRPARSE_TCHAR)) {
-        out.baseType = CirType_int(CIR_IUCHAR);
+        pspec->baseType = CirType_int(CIR_IUCHAR);
     } else if (C1(CIRPARSE_TSHORT)
                 || C2(CIRPARSE_TSIGNED, CIRPARSE_TSHORT)
                 || C2(CIRPARSE_TSHORT, CIRPARSE_TINT)
                 || C3(CIRPARSE_TSIGNED, CIRPARSE_TSHORT, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_ISHORT);
+        pspec->baseType = CirType_int(CIR_ISHORT);
     } else if (C2(CIRPARSE_TUNSIGNED, CIRPARSE_TSHORT)
                 || C3(CIRPARSE_TUNSIGNED, CIRPARSE_TSHORT, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_IUSHORT);
+        pspec->baseType = CirType_int(CIR_IUSHORT);
     } else if (typeSpecs.len == 0
                 || C1(CIRPARSE_TINT)
                 || C1(CIRPARSE_TSIGNED)
                 || C2(CIRPARSE_TSIGNED, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_IINT);
+        pspec->baseType = CirType_int(CIR_IINT);
     } else if (C1(CIRPARSE_TUNSIGNED)
                 || C2(CIRPARSE_TUNSIGNED, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_IUINT);
+        pspec->baseType = CirType_int(CIR_IUINT);
     } else if (C1(CIRPARSE_TLONG)
                 || C2(CIRPARSE_TSIGNED, CIRPARSE_TLONG)
                 || C2(CIRPARSE_TLONG, CIRPARSE_TINT)
                 || C3(CIRPARSE_TSIGNED, CIRPARSE_TLONG, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_ILONG);
+        pspec->baseType = CirType_int(CIR_ILONG);
     } else if (C2(CIRPARSE_TUNSIGNED, CIRPARSE_TLONG)
                 || C3(CIRPARSE_TUNSIGNED, CIRPARSE_TLONG, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_IULONG);
+        pspec->baseType = CirType_int(CIR_IULONG);
     } else if (C2(CIRPARSE_TLONG, CIRPARSE_TLONG)
                 || C3(CIRPARSE_TSIGNED, CIRPARSE_TLONG, CIRPARSE_TLONG)
                 || C3(CIRPARSE_TLONG, CIRPARSE_TLONG, CIRPARSE_TINT)
                 || C4(CIRPARSE_TSIGNED, CIRPARSE_TLONG, CIRPARSE_TLONG, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_ILONGLONG);
+        pspec->baseType = CirType_int(CIR_ILONGLONG);
     } else if (C3(CIRPARSE_TUNSIGNED, CIRPARSE_TLONG, CIRPARSE_TLONG)
                 || C4(CIRPARSE_TUNSIGNED, CIRPARSE_TLONG, CIRPARSE_TLONG, CIRPARSE_TINT)) {
-        out.baseType = CirType_int(CIR_IULONGLONG);
+        pspec->baseType = CirType_int(CIR_IULONGLONG);
     } else if (C1(CIRPARSE_TFLOAT)) {
-        out.baseType = CirType_float(CIR_FFLOAT);
+        pspec->baseType = CirType_float(CIR_FFLOAT);
     } else if (C1(CIRPARSE_TDOUBLE)) {
-        out.baseType = CirType_float(CIR_FDOUBLE);
+        pspec->baseType = CirType_float(CIR_FDOUBLE);
     } else if (C2(CIRPARSE_TLONG, CIRPARSE_TDOUBLE)) {
-        out.baseType = CirType_float(CIR_FLONGDOUBLE);
+        pspec->baseType = CirType_float(CIR_FLONGDOUBLE);
     } else if (C1(CIRPARSE_TNAMED)) {
-        out.baseType = CirType_typedef(typeSpecs.items[0].data.tid);
+        pspec->baseType = CirType_typedef(typeSpecs.items[0].data.tid);
     } else if (C1(CIRPARSE_TCOMP)) {
-        out.baseType = CirType_comp(typeSpecs.items[0].data.cid);
+        pspec->baseType = CirType_comp(typeSpecs.items[0].data.cid);
     } else if (C1(CIRPARSE_TAUTOTYPE)) {
-        out.baseType = NULL;
+        pspec->baseType = NULL;
     } else if (C1(CIRPARSE_TBUILTIN_VA_LIST)) {
-        out.baseType = CirType_valist();
+        pspec->baseType = CirType_valist();
     } else {
         cir_fatal("invalid combination of type specifiers");
     }
@@ -1204,8 +1305,6 @@ finish:
 #undef C2
 #undef C3
 #undef C4
-
-    return out;
 }
 
 static void declarator(CirName *, CirParse__DeclArray *, CirAttrArray *, int);
@@ -1238,28 +1337,31 @@ parameter_list(CirFunParamArray *outArr)
         if (!decl_spec_list_FIRST())
             cir_fatal("parameter_list: expected FIRST(decl_spec_list)");
 
-        CirParse__ProcessedSpec processedSpec = decl_spec_list();
-        if (!processedSpec.baseType)
+        CirParse__ProcessedSpec pspec;
+        CirParse__ProcessedSpec_init(&pspec);
+        decl_spec_list(&pspec);
+        if (!pspec.baseType)
             cir_fatal("parameter_list: __auto_type not allowed");
-        if (processedSpec.isInline)
+        if (pspec.isInline)
             cir_fatal("inline specifier not allowed in parameter list");
-        if (processedSpec.storage != CIR_NOSTORAGE)
+        if (pspec.storage != CIR_NOSTORAGE)
             cir_fatal("storage specifier not allowed in parameter list");
 
         if (cirtok.type == CIRTOK_COMMA || cirtok.type == CIRTOK_RBRACE) {
             // decl_spec_list only
-            item.type = processedSpec.baseType;
+            item.type = pspec.baseType;
         } else {
             // decl_spec_list declarator/abstract_declarator
             CirParse__DeclArray declArr = CIRARRAY_INIT;
             CirAttrArray declAttrs = CIRARRAY_INIT;
             declarator(&item.name, &declArr, &declAttrs, DECLARATOR_MAYBEABSTRACT);
-            item.type = doType(false, processedSpec.baseType, &declArr);
+            item.type = doType(false, pspec.baseType, &declArr);
             CirArray_release(&declAttrs);
             CirParse__DeclArray_release(&declArr);
         }
 
         CirArray_push(outArr, &item);
+        CirParse__ProcessedSpec_release(&pspec);
         if (cirtok.type == CIRTOK_COMMA) {
             CirLex__next();
         } else if (cirtok.type == CIRTOK_RPAREN) {
@@ -1295,8 +1397,8 @@ direct_decl(CirName *outName, CirParse__DeclArray *outArr, int mode)
         CirParse__DeclItem item = {};
         item.type = CIRPARSE_DTPAREN;
 
-        if (attribute_list_FIRST(false))
-            attribute_list(&item.attrs, false);
+        if (attribute_list_FIRST(false, true))
+            attribute_list(&item.attrs, false, true);
 
         declarator(outName, outArr, &item.rattrs, mode);
 
@@ -1321,8 +1423,8 @@ direct_decl(CirName *outName, CirParse__DeclArray *outArr, int mode)
             item.type = CIRPARSE_DTARRAY;
 
             CirLex__next();
-            if (attribute_list_FIRST(false))
-                attribute_list(&item.attrs, false);
+            if (attribute_list_FIRST(false, true))
+                attribute_list(&item.attrs, false, true);
             if (cirtok.type == CIRTOK_RBRACKET) {
                 // no array len
                 item.hasLen = false;
@@ -1336,9 +1438,12 @@ direct_decl(CirName *outName, CirParse__DeclArray *outArr, int mode)
                 const CirValue *v = CirCode_getValue(code_id);
                 if (!v)
                     cir_fatal("Array size expression has no value.");
-                uint32_t ikind = CirValue_isInt(v);
-                if (!ikind)
+                if (!CirValue_isInt(v))
                     cir_fatal("Array size constant is not an integer.");
+                const CirType *type = CirValue_getType(v);
+                uint32_t ikind;
+                if (!(ikind = CirType_isInt(CirType_unroll(type))))
+                    cir_fatal("Array size constant does not have integer type.");
                 // Try to convert it into an arrayLen
                 uint32_t arrayLen;
                 if (CirIkind_isSigned(ikind, CirParse__mach)) {
@@ -1354,6 +1459,8 @@ direct_decl(CirName *outName, CirParse__DeclArray *outArr, int mode)
                         cir_fatal("Array size constant is too large");
                     arrayLen = val;
                 }
+                if (!arrayLen)
+                    cir_fatal("Array size cannot be zero");
                 item.hasLen = true;
                 item.arrayLen = arrayLen;
 
@@ -1392,8 +1499,8 @@ declarator(CirName *outName, CirParse__DeclArray *outArr, CirAttrArray *outAttrs
         item.type = CIRPARSE_DTPTR;
 
         // attribute?
-        if (attribute_list_FIRST(false))
-            attribute_list(&item.attrs, false);
+        if (attribute_list_FIRST(false, true))
+            attribute_list(&item.attrs, false, true);
 
         CirArray_push(&pointers, &item);
     }
@@ -1401,8 +1508,8 @@ declarator(CirName *outName, CirParse__DeclArray *outArr, CirAttrArray *outAttrs
     direct_decl(outName, outArr, mode);
 
     // attributes_with_asm
-    if (attribute_list_FIRST(true))
-        attribute_list(outAttrs, true);
+    if (attribute_list_FIRST(true, true))
+        attribute_list(outAttrs, true, true);
 
     // Apply pointers (backwards)
     for (size_t i = 0; i < pointers.len; i++) {
@@ -1526,7 +1633,9 @@ type_name(int expectedFollow)
 {
     assert(decl_spec_list_FIRST());
 
-    CirParse__ProcessedSpec pspec = decl_spec_list();
+    CirParse__ProcessedSpec pspec;
+    CirParse__ProcessedSpec_init(&pspec);
+    decl_spec_list(&pspec);
     if (pspec.isTypedef)
         cir_fatal("type_name: typedef not allowed");
     if (!pspec.baseType)
@@ -1536,8 +1645,10 @@ type_name(int expectedFollow)
     if (pspec.storage != CIR_NOSTORAGE)
         cir_fatal("type_name: storage specifier not allowed");
 
-    if (cirtok.type == expectedFollow)
+    if (cirtok.type == expectedFollow) {
+        CirParse__ProcessedSpec_release(&pspec);
         return pspec.baseType; // No declarator following
+    }
 
     CirParse__DeclArray declArr = CIRARRAY_INIT;
     CirAttrArray declAttrs = CIRARRAY_INIT;
@@ -1546,6 +1657,7 @@ type_name(int expectedFollow)
 
     const CirType *t = doType(false, pspec.baseType, &declArr);
     CirParse__DeclArray_release(&declArr);
+    CirParse__ProcessedSpec_release(&pspec);
     return t;
 }
 
@@ -1645,7 +1757,9 @@ declareOneCompField(CirCompId cid, const CirType *bt)
 static void
 comp_field_declaration(CirCompId cid)
 {
-    CirParse__ProcessedSpec pspec = decl_spec_list();
+    CirParse__ProcessedSpec pspec;
+    CirParse__ProcessedSpec_init(&pspec);
+    decl_spec_list(&pspec);
 
     if (pspec.isTypedef)
         cir_fatal("comp_field_declaration: typedef not allowed");
@@ -1659,6 +1773,7 @@ comp_field_declaration(CirCompId cid)
     // Are we actually declaring anything?
     if (cirtok.type == CIRTOK_SEMICOLON) {
         CirLex__next();
+        CirParse__ProcessedSpec_release(&pspec);
         return;
     }
 
@@ -1671,11 +1786,13 @@ comp_field_declaration(CirCompId cid)
         } else if (cirtok.type == CIRTOK_SEMICOLON) {
             // Terminate
             CirLex__next();
-            return;
+            break;
         } else {
             unexpected_token("struct field declaration", "`,`, `;`");
         }
     }
+
+    CirParse__ProcessedSpec_release(&pspec);
 }
 
 static void
@@ -1686,7 +1803,9 @@ declaration_or_function_definition(CirCodeId ownerCode)
     CirVarId vid;
 
     // First parse specifier
-    CirParse__ProcessedSpec pspec = decl_spec_list();
+    CirParse__ProcessedSpec pspec;
+    CirParse__ProcessedSpec_init(&pspec);
+    decl_spec_list(&pspec);
 
     // Do some checks on specifier
     if (pspec.isTypedef) {
@@ -1701,6 +1820,7 @@ declaration_or_function_definition(CirCodeId ownerCode)
     // Are we actually declaring anything?
     if (cirtok.type == CIRTOK_SEMICOLON) {
         CirLex__next();
+        CirParse__ProcessedSpec_release(&pspec);
         return;
     }
 
@@ -1714,6 +1834,7 @@ declaration_or_function_definition(CirCodeId ownerCode)
                 CirLex__next();
             } else if (cirtok.type == CIRTOK_SEMICOLON) {
                 CirLex__next();
+                CirParse__ProcessedSpec_release(&pspec);
                 return;
             } else {
                 unexpected_token("typedef", "`,`, `;`");
@@ -1754,7 +1875,7 @@ declaration_or_function_definition(CirCodeId ownerCode)
             CirVar_setFormal(vid, i, paramVid);
         }
 
-        CirCodeId block_code = block();
+        CirCodeId block_code = block(true);
         CirCode_append(fun_code, block_code);
         CirEnv__popScope();
         assert(CirCode_isExpr(fun_code));
@@ -1778,15 +1899,45 @@ declaration_loop_rest:
             CirLex__next();
         } else if (cirtok.type == CIRTOK_EQ) {
             // Initializer
-            cir_bug("TODO: handle initializer");
+            CirLex__next(); // consume EQ
+            if (!ownerCode)
+                cir_bug("TODO: handle initializer in global scope");
+            if (cirtok.type == CIRTOK_LBRACE) {
+                cir_bug("TODO: handle compound initializer");
+            } else {
+                CirCodeId code_id = expression();
+                const CirValue *value = CirCode_getValue(code_id);
+                if (!value)
+                    cir_fatal("initializer expression has no value");
+                const CirType *type = CirValue_getType(value);
+                if (!CirVar_getType(vid))
+                    CirVar_setType(vid, type);
+                CirCode_append(ownerCode, code_id);
+                CirStmtId stmt_id = CirCode_appendNewStmt(ownerCode);
+                CirStmt_toUnOp(stmt_id, CirValue_ofVar(vid), CIR_UNOP_IDENTITY, value);
+                CirCode_setValue(ownerCode, NULL);
+            }
+
+            if (cirtok.type == CIRTOK_COMMA) {
+                // Continuing
+                CirLex__next();
+            } else if (cirtok.type == CIRTOK_SEMICOLON) {
+                // Terminate
+                CirLex__next();
+                break;
+            } else {
+                unexpected_token("var declaration", "`,`, `;`");
+            }
         } else if (cirtok.type == CIRTOK_SEMICOLON) {
             // No initializer, terminate
             CirLex__next();
-            return;
+            break;
         } else {
             unexpected_token("var declaration", "`,`, `=`, `;`");
         }
     }
+
+    CirParse__ProcessedSpec_release(&pspec);
 }
 
 static void

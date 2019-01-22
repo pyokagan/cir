@@ -68,67 +68,69 @@ typedef struct CirTypeFun {
 
 _Static_assert(alignof(CirFunParam) >= alignof(const CirAttr *), "alignment");
 
-static CirType voidType = {
+static const CirType voidType = {
     .data1 = typeToData1(CIR_TVOID),
 };
-static CirType shortType = {
+static const CirType shortType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_ISHORT),
 };
-static CirType ushortType = {
+static const CirType ushortType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IUSHORT),
 };
-static CirType intType = {
+static const CirType intType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IINT),
 };
-static CirType uintType = {
+static const CirType uintType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IUINT),
 };
-static CirType longType = {
+static const CirType longType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_ILONG),
 };
-static CirType ulongType = {
+static const CirType ulongType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IULONG),
 };
-static CirType charType = {
+static const CirType charType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_ICHAR),
 };
-static CirType scharType = {
+static const CirType scharType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_ISCHAR),
 };
-static CirType ucharType = {
+static const CirType ucharType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IUCHAR),
 };
-static CirType boolType = {
+static const CirType boolType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IBOOL),
 };
-static CirType longlongType = {
+static const CirType longlongType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_ILONGLONG),
 };
-static CirType ulonglongType = {
+static const CirType ulonglongType = {
     .data1 = typeToData1(CIR_TINT) | u1ToData1(CIR_IULONGLONG),
 };
-static CirType floatType = {
+static const CirType floatType = {
     .data1 = typeToData1(CIR_TFLOAT) | u1ToData1(CIR_FFLOAT),
 };
-static CirType doubleType = {
+static const CirType doubleType = {
     .data1 = typeToData1(CIR_TFLOAT) | u1ToData1(CIR_FDOUBLE),
 };
-static CirType longdoubleType = {
+static const CirType longdoubleType = {
     .data1 = typeToData1(CIR_TFLOAT) | u1ToData1(CIR_FLONGDOUBLE),
 };
-static CirType valistType = {
+static const CirType valistType = {
     .data1 = typeToData1(CIR_TVALIST),
 };
 
 bool
 CirType_isVoid(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TVOID;
 }
 
 uint32_t
 CirType_isInt(const CirType *type)
 {
+    assert(type);
     if (data1ToType(type->data1) != CIR_TINT)
         return 0;
     return data1ToU1(type->data1);
@@ -137,6 +139,7 @@ CirType_isInt(const CirType *type)
 uint32_t
 CirType_isFloat(const CirType *type)
 {
+    assert(type);
     if (data1ToType(type->data1) != CIR_TFLOAT)
         return 0;
 
@@ -152,42 +155,49 @@ CirType_isArithmetic(const CirType *type)
 bool
 CirType_isPtr(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TPTR;
 }
 
 bool
 CirType_isArray(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TARRAY;
 }
 
 bool
 CirType_isFun(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TFUN;
 }
 
 bool
 CirType_isNamed(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TNAMED;
 }
 
 bool
 CirType_isComp(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TCOMP;
 }
 
 bool
 CirType_isVaList(const CirType *type)
 {
+    assert(type);
     return data1ToType(type->data1) == CIR_TVALIST;
 }
 
 const CirType *
 CirType_getBaseType(const CirType *type)
 {
+    assert(type);
     switch (data1ToType(type->data1)) {
     case CIR_TPTR:
         return ((const CirTypePtr *) type)->baseType;
@@ -203,6 +213,7 @@ CirType_getBaseType(const CirType *type)
 CirTypedefId
 CirType_getTypedefId(const CirType *type)
 {
+    assert(type);
     if (data1ToType(type->data1) != CIR_TNAMED)
         cir_fatal("CirType_getTypedefId called on non-named type");
 
@@ -212,6 +223,7 @@ CirType_getTypedefId(const CirType *type)
 CirCompId
 CirType_getCompId(const CirType *type)
 {
+    assert(type);
     if (data1ToType(type->data1) != CIR_TCOMP)
         cir_fatal("CirType_getCompId called on non-comp type");
 
@@ -542,6 +554,32 @@ CirType_unrollDeep(const CirType *t)
     }
 }
 
+const CirType *
+CirType_removeQual(const CirType *type)
+{
+    // TODO: optimize
+    const CirAttr *attrs[] = {
+        CirAttr_name(CirName_of("const")),
+        CirAttr_name(CirName_of("restrict")),
+        CirAttr_name(CirName_of("volatile"))
+    };
+    return CirType_removeAttrs(type, attrs, 3);
+}
+
+const CirType *
+CirType_lvalConv(const CirType *type)
+{
+    const CirType *unrolledType = CirType_unroll(type);
+    if (CirType_isFun(unrolledType)) {
+        return CirType_ptr(type);
+    } else if (CirType_isArray(unrolledType)) {
+        return CirType__ptr(CirType_getBaseType(unrolledType), CirType_getAttrs(unrolledType), CirType_getNumAttrs(unrolledType));
+    } else {
+        const CirType *unqualType = CirType_removeQual(unrolledType);
+        return unqualType == unrolledType ? type : unqualType;
+    }
+}
+
 size_t
 CirType_getNumAttrs(const CirType *t)
 {
@@ -634,6 +672,27 @@ CirType_replaceAttrs(const CirType *t, const CirAttr *const *attrs, size_t numAt
     default:
         cir_bug("unknown type???");
     }
+}
+
+const CirType *
+CirType_removeAttrs(const CirType *t, const CirAttr *const *attrs, size_t numAttrs)
+{
+    if (!numAttrs)
+        return t; // No-op
+
+    size_t initialNumAttrs = CirType_getNumAttrs(t);
+    CirAttrArray arr = CIRARRAY_INIT;
+    CirAttrArray__remove(&arr, CirType_getAttrs(t), initialNumAttrs, attrs, numAttrs);
+
+    // Did any attrs actually get removed?
+    if (arr.len == initialNumAttrs) {
+        CirArray_release(&arr);
+        return t;
+    }
+
+    const CirType *ret = CirType_replaceAttrs(t, arr.items, arr.len);
+    CirArray_release(&arr);
+    return ret;
 }
 
 size_t
