@@ -573,6 +573,12 @@ CirBuild__div(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     BINARITH_TEMPLATE("div", CIR_BINOP_DIV, a / b)
 }
 
+CirCodeId
+CirBuild__mod(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    BINARITH_TEMPLATE("mod", CIR_BINOP_MOD, a % b);
+}
+
 static CirCodeId
 CirBuild__plusA(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
 {
@@ -670,6 +676,18 @@ CirBuild__arraySubscript(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     return code_id;
 }
 
+static void
+CirBuild__minusPtr(CirCodeId code_id, const CirType *ptrType, const CirValue *lhsValue, const CirValue *rhsValue)
+{
+    // TODO: Support constant ptrs (e.g. NULL ptr)
+    CirVarId dst_id = CirVar_new(code_id);
+    const CirValue *dst_var = CirValue_ofVar(dst_id);
+    CirVar_setType(dst_id, ptrType);
+    CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+    CirStmt_toBinOp(stmt_id, dst_var, CIR_BINOP_MINUS, lhsValue, rhsValue);
+    CirCode_setValue(code_id, dst_var);
+}
+
 // Handles overloaded -
 CirCodeId
 CirBuild__minus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
@@ -683,7 +701,9 @@ CirBuild__minus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     if (CirType_isArithmetic(lhs_type) && CirType_isArithmetic(rhs_type)) {
         return CirBuild__minusA(lhs, rhs, mach);
     } else if (CirType_isPtr(lhs_type) && CirType_isInt(rhs_type)) {
-        cir_bug("TODO: MinusPI");
+        CirCode_append(lhs, rhs);
+        CirBuild__minusPtr(lhs, lhs_type, lhs_value, rhs_value);
+        return lhs;
     } else if (CirType_isPtr(lhs_type) && CirType_isPtr(rhs_type)) {
         cir_bug("TODO: MinusPP");
     } else {
@@ -855,14 +875,164 @@ toCond(CirCodeId code_id, CirStmtId *firstStmt)
     if (!value)
         cir_fatal("toCond: no value");
     CirCode__toEmptyCond(code_id);
-    CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
-    CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, value, CirValue_ofI64(CIR_IINT, 0), 0);
-    if (firstStmt)
-        *firstStmt = stmt_id;
-    CirCode_addTrueJump(code_id, stmt_id);
-    stmt_id = CirCode_appendNewStmt(code_id);
-    CirStmt_toGoto(stmt_id, 0);
-    CirCode_addFalseJump(code_id, stmt_id);
+    if (CirValue_isInt(value)) {
+        // True or false jump only
+        CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+        if (firstStmt)
+            *firstStmt = stmt_id;
+        CirStmt_toGoto(stmt_id, 0);
+        if (CirValue_getU64(value))
+            CirCode_addTrueJump(code_id, stmt_id);
+        else
+            CirCode_addFalseJump(code_id, stmt_id);
+    } else if (CirValue_isString(value)) {
+        // True jump only
+        CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+        if (firstStmt)
+            *firstStmt = stmt_id;
+        CirStmt_toGoto(stmt_id, 0);
+        CirCode_addTrueJump(code_id, stmt_id);
+    } else {
+        // True jump and false jump
+        CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+        CirStmt_toCmp(stmt_id, CIR_CONDOP_NE, value, CirValue_ofI64(CIR_IINT, 0), 0);
+        if (firstStmt)
+            *firstStmt = stmt_id;
+        CirCode_addTrueJump(code_id, stmt_id);
+        stmt_id = CirCode_appendNewStmt(code_id);
+        CirStmt_toGoto(stmt_id, 0);
+        CirCode_addFalseJump(code_id, stmt_id);
+    }
+}
+
+CirCodeId
+CirBuild__land(CirCodeId lhs, CirCodeId rhs)
+{
+    if (CirCode_isExpr(lhs)) {
+        const CirValue *value = CirCode_getValue(lhs);
+        if (!value)
+            cir_fatal("&&: lhs has no value");
+
+        // Is this a constant?
+        bool lhsIsAlwaysTrue = false, lhsIsAlwaysFalse = false;
+        if (CirValue_isInt(value)) {
+            if (CirValue_getU64(value))
+                lhsIsAlwaysTrue = true;
+            else
+                lhsIsAlwaysFalse = true;
+        } else if (CirValue_isString(value)) {
+            // Strings are always true
+            lhsIsAlwaysTrue = true;
+        }
+
+        if (lhsIsAlwaysTrue) {
+            // Depends on whether rhs is an expr or cond as well
+            if (CirCode_isExpr(rhs)) {
+                const CirValue *rhsValue = CirCode_getValue(rhs);
+                if (!value)
+                    cir_fatal("&&: rhs has no value");
+
+                // Is rhs a constant?
+                if (CirValue_isInt(rhsValue)) {
+                    CirCode_append(lhs, rhs);
+                    CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, !!CirValue_getU64(rhsValue)));
+                } else if (CirValue_isString(rhsValue)) {
+                    CirCode_append(lhs, rhs);
+                    CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, 1));
+                } else {
+                    toCond(rhs, NULL);
+                    CirCode_append(lhs, rhs);
+                }
+                return lhs;
+            } else {
+                CirCode_append(lhs, rhs);
+                return lhs;
+            }
+        } else if (lhsIsAlwaysFalse) {
+            // Run lhs only.
+            CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, 0));
+            return lhs;
+        }
+
+        toCond(lhs, NULL);
+        // Fallthrough to the rest of the code to process the conditional lhs
+    }
+
+    // Lhs is a cond, will need to do backpatching
+    assert(CirCode_isCond(lhs));
+    // Rhs must be a cond
+    CirStmtId rhsFirstStmt = CirCode_getFirstStmt(rhs);
+    if (CirCode_isExpr(rhs))
+        toCond(rhs, rhsFirstStmt ? NULL : &rhsFirstStmt);
+    assert(rhsFirstStmt); // If rhs was already a cond, then it will have at least one stmt.
+    backpatch(&codes[lhs].truejumps, rhsFirstStmt);
+    CirCode_append(lhs, rhs);
+    return lhs;
+}
+
+CirCodeId
+CirBuild__lor(CirCodeId lhs, CirCodeId rhs)
+{
+    if (CirCode_isExpr(lhs)) {
+        const CirValue *value = CirCode_getValue(lhs);
+        if (!value)
+            cir_fatal("||: lhs has no value");
+
+        // Is this a constant?
+        bool lhsIsAlwaysTrue = false, lhsIsAlwaysFalse = false;
+        if (CirValue_isInt(value)) {
+            if (CirValue_getU64(value))
+                lhsIsAlwaysTrue = true;
+            else
+                lhsIsAlwaysFalse = true;
+        } else if (CirValue_isString(value)) {
+            // Strings are always true
+            lhsIsAlwaysTrue = true;
+        }
+
+        if (lhsIsAlwaysTrue) {
+            // Run lhs only.
+            CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, 1));
+            return lhs;
+        } else if (lhsIsAlwaysFalse) {
+            // Depends on whether rhs is an expr or cond as well
+            if (CirCode_isExpr(rhs)) {
+                const CirValue *rhsValue = CirCode_getValue(rhs);
+                if (!value)
+                    cir_fatal("||: rhs has no value");
+
+                // Is rhs a constant?
+                if (CirValue_isInt(rhsValue)) {
+                    CirCode_append(lhs, rhs);
+                    CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, !!CirValue_getU64(rhsValue)));
+                } else if (CirValue_isString(rhsValue)) {
+                    CirCode_append(lhs, rhs);
+                    CirCode_setValue(lhs, CirValue_ofI64(CIR_IINT, 1));
+                } else {
+                    toCond(rhs, NULL);
+                    CirCode_append(lhs, rhs);
+                }
+                return lhs;
+            } else {
+                CirCode_append(lhs, rhs);
+                return lhs;
+            }
+        }
+
+        toCond(lhs, NULL);
+        // Fallthrough to the rest of the code to process the conditional lhs
+    }
+
+    // Lhs is a cond, will need to do backpatching
+    assert(CirCode_isCond(lhs));
+    // Rhs must be a cond
+    CirStmtId rhsFirstStmt = CirCode_getFirstStmt(rhs);
+    if (CirCode_isExpr(rhs))
+        toCond(rhs, rhsFirstStmt ? NULL : &rhsFirstStmt);
+    assert(rhsFirstStmt); // If rhs was already a cond, then it will have at least one stmt.
+    backpatch(&codes[lhs].falsejumps, rhsFirstStmt);
+    CirCode_append(lhs, rhs);
+    return lhs;
 }
 
 CirCodeId
@@ -950,15 +1120,18 @@ CirBuild__if(CirCodeId condCode, CirCodeId thenCode, CirCodeId elseCode)
 }
 
 CirCodeId
-CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
+CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode)
 {
     assert(condCode);
+
+    if (afterCode)
+        afterCode = CirCode_toExpr(afterCode, true);
 
     // The type of code we generate depends on whether condCode is a constant
     if (CirCode_isExpr(condCode)) {
         const CirValue *value = CirCode_getValue(condCode);
         if (!value)
-            cir_fatal("while: conditional expression has no value");
+            cir_fatal("for: conditional expression has no value");
 
         // Is this a constant?
         bool genInfiniteLoop = false, genNoLoop = false;
@@ -974,11 +1147,37 @@ CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
         }
 
         if (genInfiniteLoop) {
-            firstStmt = firstStmt ? firstStmt : CirCode_getFirstStmt(thenCode);
+            if (!firstStmt && thenCode)
+                firstStmt = CirCode_getFirstStmt(thenCode);
+            if (!firstStmt && afterCode)
+                firstStmt = CirCode_getFirstStmt(afterCode);
+            CirStmtId afterStmt = afterCode ? CirCode_getFirstStmt(afterCode) : 0;
+            if (!afterStmt)
+                afterStmt = firstStmt;
+            CirStmtId thenStartStmt = 0, thenEndStmt = 0;
+            if (thenCode) {
+                thenStartStmt = CirCode_getFirstStmt(thenCode);
+                thenEndStmt = CirCode_getLastStmt(thenCode);
+            }
             CirCode_append(condCode, thenCode);
+            CirCode_append(condCode, afterCode);
             CirStmtId gotoStmt = CirCode_appendNewStmt(condCode);
             CirStmt_toGoto(gotoStmt, firstStmt ? firstStmt : gotoStmt);
             CirCode_setValue(condCode, NULL);
+            // Resolve breaks and continues within thenCode
+            CirStmtId restStmt = 0;
+            for (CirStmtId stmt_id = thenStartStmt; stmt_id; stmt_id = CirStmt_getNext(stmt_id)) {
+                if (CirStmt_isBreak(stmt_id)) {
+                    if (!restStmt)
+                        restStmt = CirCode_appendNewStmt(condCode);
+                    CirStmt_toGoto(stmt_id, restStmt);
+                } else if (CirStmt_isContinue(stmt_id)) {
+                    assert(afterStmt); // If there is at least one stmt in thenCode, then afterStmt will not be 0
+                    CirStmt_toGoto(stmt_id, afterStmt);
+                }
+                if (stmt_id == thenEndStmt)
+                    break;
+            }
             return condCode;
         } else if (genNoLoop) {
             CirCode_setValue(condCode, NULL);
@@ -992,11 +1191,27 @@ CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
     // Is a Cond, will need to do backpatching
     assert(CirCode_isCond(condCode));
     assert(firstStmt);
-    CirCodeId thenFirstStmt;
-    if (thenCode && (thenFirstStmt = CirCode_getFirstStmt(thenCode))) {
+    CirStmtId afterStmt = afterCode ? CirCode_getFirstStmt(afterCode) : 0;
+    if (!afterStmt)
+        afterStmt = firstStmt;
+    CirStmtId thenStartStmt = 0, thenEndStmt = 0;
+    if (thenCode) {
+        thenStartStmt = CirCode_getFirstStmt(thenCode);
+        thenEndStmt = CirCode_getLastStmt(thenCode);
+    }
+
+    CirCodeId trueFirstStmt;
+    if (thenCode && (trueFirstStmt = CirCode_getFirstStmt(thenCode))) {
         assert(CirCode_isExpr(thenCode));
         CirCode_append(condCode, thenCode);
-        backpatch(&codes[condCode].truejumps, thenFirstStmt);
+        CirCode_append(condCode, afterCode);
+        backpatch(&codes[condCode].truejumps, trueFirstStmt);
+        CirCodeId gotoStmt = CirCode_appendNewStmt(condCode);
+        CirStmt_toGoto(gotoStmt, firstStmt);
+    } else if (afterCode && (trueFirstStmt = CirCode_getFirstStmt(afterCode))) {
+        assert(CirCode_isExpr(afterCode));
+        CirCode_append(condCode, afterCode);
+        backpatch(&codes[condCode].truejumps, trueFirstStmt);
         CirCodeId gotoStmt = CirCode_appendNewStmt(condCode);
         CirStmt_toGoto(gotoStmt, firstStmt);
     } else {
@@ -1006,11 +1221,22 @@ CirBuild__while(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode)
     CirStmtId restStmt = CirCode_appendNewStmt(condCode);
     backpatch(&codes[condCode].falsejumps, restStmt);
 
+    // Resolve breaks and continues within thenCode
+    for (CirStmtId stmt_id = thenStartStmt; stmt_id; stmt_id = CirStmt_getNext(stmt_id)) {
+        if (CirStmt_isBreak(stmt_id))
+            CirStmt_toGoto(stmt_id, restStmt);
+        else if (CirStmt_isContinue(stmt_id))
+            CirStmt_toGoto(stmt_id, afterStmt);
+        if (stmt_id == thenEndStmt)
+            break;
+    }
+
     // All truejumps/falsejumps should have been consumed
     assert(codes[condCode].truejumps.len == 0);
     assert(codes[condCode].falsejumps.len == 0);
     condCode = CirCode_toExpr(condCode, true);
     return condCode;
+
 }
 
 CirCodeId
@@ -1042,4 +1268,67 @@ CirBuild__lnot(CirCodeId condCode)
         codes[condCode].falsejumps = tmp;
     }
     return condCode;
+}
+
+CirCodeId
+CirBuild__addrof(CirCodeId code_id)
+{
+    if (CirCode_isCond(code_id))
+        cir_fatal("addrof: operand is a temporary");
+    const CirValue *value = CirCode_getValue(code_id);
+    if (!value)
+        cir_fatal("addrof: operand has no value");
+    if (!CirValue_isLval(value))
+        cir_fatal("addrof: operand is not a lvalue");
+    if (CirValue_getNumFields(value) || CirValue_isVar(value)) {
+        // Must use addrof with a temporary
+        CirVarId tmp_id = CirVar_new(code_id);
+        const CirType *type = CirValue_getType(value);
+        if (type) {
+            const CirType *unrolledType = CirType_unroll(type);
+            if (CirType_isArray(unrolledType) || CirType_isFun(unrolledType))
+                CirVar_setType(tmp_id, CirType_lvalConv(type));
+            else
+                CirVar_setType(tmp_id, CirType_ptr(type));
+        }
+        const CirValue *tmp_value = CirValue_ofVar(tmp_id);
+        CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+        CirStmt_toUnOp(stmt_id, tmp_value, CIR_UNOP_ADDROF, value);
+        CirCode_setValue(code_id, tmp_value);
+    } else {
+        // Mem with no field access, equivalent to &(*x).
+        // Convert back to Var.
+        assert(CirValue_isMem(value));
+        CirCode_setValue(code_id, CirValue_ofVar(CirValue_getVar(value)));
+    }
+    return code_id;
+}
+
+CirCodeId
+CirBuild__deref(CirCodeId code_id)
+{
+    if (CirCode_isCond(code_id))
+        cir_fatal("deref: operand does not have pointer type");
+    const CirValue *value = CirCode_getValue(code_id);
+    if (!value)
+        cir_fatal("deref: operand has no value");
+    const CirType *valueType = CirValue_getType(value);
+    if (valueType)
+        valueType = CirType_lvalConv(valueType);
+    if (CirValue_getNumFields(value) || CirValue_isMem(value)) {
+        // Must use temporary
+        CirVarId tmp_id = CirVar_new(code_id);
+        if (valueType)
+            CirVar_setType(tmp_id, valueType);
+        const CirValue *tmp_value = CirValue_ofVar(tmp_id);
+        CirStmtId stmt_id = CirCode_appendNewStmt(code_id);
+        CirStmt_toUnOp(stmt_id, tmp_value, CIR_UNOP_IDENTITY, value);
+        CirCode_setValue(code_id, CirValue_ofMem(tmp_id));
+    } else {
+        // Var with no field access, equivalent to *x.
+        // Convert to Mem.
+        assert(CirValue_isVar(value));
+        CirCode_setValue(code_id, CirValue_ofMem(CirValue_getVar(value)));
+    }
+    return code_id;
 }

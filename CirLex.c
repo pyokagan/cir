@@ -847,6 +847,11 @@ loop:
         } else if (!strcmp(strbuf, "sizeof")) {
             cirtok.type = CIRTOK_SIZEOF;
             return;
+        } else if (!strcmp(strbuf, "__extension__")) {
+            // Ignore. __extension__ is used to indicate that the declaration/expression
+            // should be handled in GNU-C mode.
+            // However, we already try to support GNU C extensions whether __extension__ is used or not.
+            goto loop;
         }
 
         // Convert to name

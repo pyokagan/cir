@@ -10,6 +10,8 @@
 #define CIR_STMT_RETURN 4
 #define CIR_STMT_CMP 5
 #define CIR_STMT_GOTO 6
+#define CIR_STMT_BREAK 7
+#define CIR_STMT_CONTINUE 8
 
 // data1:
 // bits 31 to 28: type
@@ -239,6 +241,22 @@ CirStmt_toGoto(CirStmtId stmt_id, CirStmtId jumpTarget)
     stmts[stmt_id].jumpTarget = jumpTarget;
 }
 
+void
+CirStmt_toBreak(CirStmtId stmt_id)
+{
+    assert(stmt_id != 0);
+
+    CirStmt__setType(stmt_id, CIR_STMT_BREAK);
+}
+
+void
+CirStmt_toContinue(CirStmtId stmt_id)
+{
+    assert(stmt_id != 0);
+
+    CirStmt__setType(stmt_id, CIR_STMT_CONTINUE);
+}
+
 bool
 CirStmt_isNop(CirStmtId sid)
 {
@@ -292,6 +310,20 @@ bool
 CirStmt_isJump(CirStmtId stmt_id)
 {
     return CirStmt_isCmp(stmt_id) || CirStmt_isGoto(stmt_id);
+}
+
+bool
+CirStmt_isBreak(CirStmtId stmt_id)
+{
+    assert(stmt_id != 0);
+    return data1ToType(stmts[stmt_id].data1) == CIR_STMT_BREAK;
+}
+
+bool
+CirStmt_isContinue(CirStmtId stmt_id)
+{
+    assert(stmt_id != 0);
+    return data1ToType(stmts[stmt_id].data1) == CIR_STMT_CONTINUE;
 }
 
 uint32_t
@@ -465,6 +497,12 @@ CirStmt_print(CirFmt printer, CirStmtId sid, bool renderName)
         } else {
             CirFmt_printString(printer, "<CirStmt 0>");
         }
+        break;
+    case CIR_STMT_BREAK:
+        CirFmt_printString(printer, "break");
+        break;
+    case CIR_STMT_CONTINUE:
+        CirFmt_printString(printer, "continue");
         break;
     default:
         cir_bug("CirStmt_log: unexpected stmt type");

@@ -10,6 +10,8 @@ OBJECTS= \
 		CirComp.o \
 		CirDl.o \
 		CirEnv.o \
+		CirFkind.o \
+		CirHash.o \
 		CirIkind.o \
 		CirLex.o \
 		CirLog.o \
@@ -17,6 +19,7 @@ OBJECTS= \
 		CirMem.o \
 		CirName.o \
 		CirParse.o \
+		CirPrime.o \
 		CirQuote.o \
 		CirRender.o \
 		CirStmt.o \
@@ -38,6 +41,8 @@ CirCode.o: CirCode.c $(HEADERS)
 CirComp.o: CirComp.c $(HEADERS)
 CirDl.o: CirDl.c $(HEADERS)
 CirEnv.o: CirEnv.c $(HEADERS)
+CirFkind.o: CirFkind.c $(HEADERS)
+CirHash.o: CirHash.c $(HEADERS)
 CirIkind.o: CirIkind.c $(HEADERS)
 CirLex.o: CirLex.c $(HEADERS)
 CirLog.o: CirLog.c $(HEADERS)
@@ -45,6 +50,7 @@ CirMachine.o: CirMachine.c $(HEADERS)
 CirMem.o: CirMem.c $(HEADERS)
 CirName.o: CirName.c $(HEADERS)
 CirParse.o: CirParse.c $(HEADERS)
+CirPrime.o: CirPrime.c $(HEADERS)
 CirQuote.o: CirQuote.c $(HEADERS)
 CirRender.o: CirRender.c $(HEADERS)
 CirStmt.o: CirStmt.c $(HEADERS)

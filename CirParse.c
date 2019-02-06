@@ -80,13 +80,18 @@ static CirCodeId expression(void);
 static CirCodeId block(bool dropValue);
 
 static void
+CirParse__DeclItem__release(CirParse__DeclItem *item)
+{
+    CirArray_release(&item->attrs);
+    CirArray_release(&item->rattrs);
+    CirArray_release(&item->funParams);
+}
+
+static void
 CirParse__DeclArray_release(CirParse__DeclArray *arr)
 {
-    for (size_t i = 0; i < arr->len; i++) {
-        CirArray_release(&arr->items[i].attrs);
-        CirArray_release(&arr->items[i].rattrs);
-        CirArray_release(&arr->items[i].funParams);
-    }
+    for (size_t i = 0; i < arr->len; i++)
+        CirParse__DeclItem__release(&arr->items[i]);
     CirArray_release(arr);
 }
 
@@ -209,6 +214,14 @@ attr(void)
         CirLex__next();
         return CirAttr_int(value);
     }
+    case CIRTOK_CHARLIT:
+        if (CirParse__mach->charIsUnsigned) {
+            uint8_t value = cirtok.data.charlit;
+            return CirAttr_int(value);
+        } else {
+            int8_t value = cirtok.data.charlit;
+            return CirAttr_int(value);
+        }
     case CIRTOK_STRINGLIT: {
         char *buf = string_literal(NULL);
         return CirAttr_str(buf);
@@ -320,6 +333,16 @@ primary_expression(void)
             val = CirValue_ofU64(cirtok.data.intlit.ikind, cirtok.data.intlit.val.u64);
         }
         CirLex__next(); // consume intlit
+        return CirCode_ofExpr(val);
+    }
+    case CIRTOK_CHARLIT: {
+        const CirValue *val;
+        if (CirParse__mach->charIsUnsigned) {
+            val = CirValue_ofU64(CIR_ICHAR, cirtok.data.charlit);
+        } else {
+            val = CirValue_ofI64(CIR_ICHAR, cirtok.data.charlit);
+        }
+        CirLex__next(); // consume charlit
         return CirCode_ofExpr(val);
     }
     case CIRTOK_STRINGLIT: {
@@ -562,6 +585,16 @@ unary_expression(void)
         CirCodeId code_id = unary_expression();
         return CirBuild__lnot(code_id);
     }
+    case CIRTOK_AND: { // addrof
+        CirLex__next();
+        CirCodeId code_id = unary_expression();
+        return CirBuild__addrof(code_id);
+    }
+    case CIRTOK_STAR: { // deref
+        CirLex__next();
+        CirCodeId code_id = unary_expression();
+        return CirBuild__deref(code_id);
+    }
     default:
         return postfix_expression();
     }
@@ -625,6 +658,11 @@ loop:
         CirLex__next();
         rhs_id = cast_expression();
         lhs_id = CirBuild__div(lhs_id, rhs_id, CirParse__mach);
+        goto loop;
+    case CIRTOK_PERCENT: // mod
+        CirLex__next();
+        rhs_id = cast_expression();
+        lhs_id = CirBuild__mod(lhs_id, rhs_id, CirParse__mach);
         goto loop;
     default:
         return lhs_id;
@@ -729,13 +767,35 @@ bitwise_or_expression(void)
 static CirCodeId
 logical_and_expression(void)
 {
-    return bitwise_or_expression();
+    CirCodeId lhs_id, rhs_id;
+    lhs_id = bitwise_or_expression();
+loop:
+    switch (cirtok.type) {
+    case CIRTOK_AND_AND: // &&
+        CirLex__next();
+        rhs_id = bitwise_or_expression();
+        lhs_id = CirBuild__land(lhs_id, rhs_id);
+        goto loop;
+    default:
+        return lhs_id;
+    }
 }
 
 static CirCodeId
 logical_or_expression(void)
 {
-    return logical_and_expression();
+    CirCodeId lhs_id, rhs_id;
+    lhs_id = logical_and_expression();
+loop:
+    switch (cirtok.type) {
+    case CIRTOK_PIPE_PIPE: // ||
+        CirLex__next();
+        rhs_id = logical_and_expression();
+        lhs_id = CirBuild__lor(lhs_id, rhs_id);
+        goto loop;
+    default:
+        return lhs_id;
+    }
 }
 
 static CirCodeId
@@ -902,8 +962,102 @@ statement(CirCodeId blockCode, bool dropValue)
         else
             CirCode_append(blockCode, condCode);
         CirCodeId thenCode = statement(0, true);
-        blockCode = CirBuild__while(blockCode, firstStmt, thenCode);
+        blockCode = CirBuild__for(blockCode, firstStmt, thenCode, 0);
         assert(CirCode_isExpr(blockCode));
+        return blockCode;
+    }
+    case CIRTOK_FOR: {
+        // For statement
+        CirLex__next(); // consume FOR
+        if (cirtok.type != CIRTOK_LPAREN)
+            unexpected_token("for", "`(`");
+        CirLex__next(); // consume LPAREN
+        CirEnv__pushScope(); // push scope
+        // clause1Code is blockCode
+        if (cirtok.type == CIRTOK_SEMICOLON) {
+            CirLex__next(); // consume SEMICOLON
+        } else if (decl_spec_list_FIRST()) {
+            // Clause1 is declaration
+            if (!blockCode)
+                blockCode = CirCode_ofExpr(NULL);
+            declaration_or_function_definition(blockCode);
+            // No need to check for `;`, declaration_or_function_definition() already consumed it.
+        } else {
+            // Clause1 is expression
+            CirCodeId clause1Code = comma_expression();
+            clause1Code = CirCode_toExpr(clause1Code, true);
+            if (cirtok.type != CIRTOK_SEMICOLON)
+                unexpected_token("for", "`;`");
+            CirLex__next(); // consume SEMICOLON
+            if (!blockCode)
+                blockCode = clause1Code;
+            else
+                CirCode_append(blockCode, clause1Code);
+        }
+        // clause2Code is also blockCode
+        CirStmtId firstStmt = 0;
+        if (cirtok.type == CIRTOK_SEMICOLON) {
+            CirLex__next(); // consume SEMICOLON
+            // Treated as always true
+            if (!blockCode)
+                blockCode = CirCode_ofExpr(CirValue_ofI64(CIR_IINT, 1));
+            else
+                CirCode_setValue(blockCode, CirValue_ofI64(CIR_IINT, 1));
+        } else {
+            // Clause2 is expression (may be cond or expr)
+            CirCodeId clause2Code = comma_expression();
+            if (cirtok.type != CIRTOK_SEMICOLON)
+                unexpected_token("for", "`;`");
+            CirLex__next(); // consume SEMICOLON
+            // Record down first stmt (may be 0)
+            firstStmt = CirCode_getFirstStmt(clause2Code);
+            if (!blockCode)
+                blockCode = clause2Code;
+            else
+                CirCode_append(blockCode, clause2Code);
+        }
+        CirCodeId clause3Code;
+        if (cirtok.type == CIRTOK_RPAREN) {
+            CirLex__next(); // consume RPAREN
+            clause3Code = 0;
+        } else {
+            // Clause3 is expression
+            clause3Code = comma_expression();
+            if (cirtok.type != CIRTOK_RPAREN)
+                unexpected_token("for", "`)`");
+            CirLex__next();
+        }
+        // Next comes the loop body
+        CirCodeId bodyCode = statement(0, true);
+        // Pop scope
+        CirEnv__popScope();
+        // Construct for loop
+        blockCode = CirBuild__for(blockCode, firstStmt, bodyCode, clause3Code);
+        assert(CirCode_isExpr(blockCode));
+        return blockCode;
+    }
+    case CIRTOK_BREAK: {
+        // break statement
+        CirLex__next();
+        if (cirtok.type != CIRTOK_SEMICOLON)
+            unexpected_token("break", "`;`");
+        CirLex__next();
+        if (!blockCode)
+            blockCode = CirCode_ofExpr(NULL);
+        CirStmtId stmt_id = CirCode_appendNewStmt(blockCode);
+        CirStmt_toBreak(stmt_id);
+        return blockCode;
+    }
+    case CIRTOK_CONTINUE: {
+        // continue statement
+        CirLex__next();
+        if (cirtok.type != CIRTOK_SEMICOLON)
+            unexpected_token("continue", "`;`");
+        CirLex__next();
+        if (!blockCode)
+            blockCode = CirCode_ofExpr(NULL);
+        CirStmtId stmt_id = CirCode_appendNewStmt(blockCode);
+        CirStmt_toContinue(stmt_id);
         return blockCode;
     }
     default: {
@@ -1406,7 +1560,10 @@ direct_decl(CirName *outName, CirParse__DeclArray *outArr, int mode)
             cir_fatal("direct_decl: expected `)`, got %s", CirLex__str(cirtok.type));
         CirLex__next();
 
-        CirArray_push(outArr, &item);
+        if (item.rattrs.len || item.attrs.len)
+            CirArray_push(outArr, &item);
+        else
+            CirParse__DeclItem__release(&item);
     } else if (mode >= DECLARATOR_ABSTRACT) {
         // No name
         if (outName)
@@ -1528,6 +1685,7 @@ doType(bool for_typedef, const CirType *bt, const CirParse__DeclArray *declArr)
         CirAttrArray nameAttrsR;
         CirAttrArray funAttrsR;
         CirAttrArray typeAttrsR;
+        bool fadded;
     };
     CirArray(struct PartitionedAttributes) partitionedAttributes = CIRARRAY_INIT;
 
@@ -1558,9 +1716,17 @@ doType(bool for_typedef, const CirType *bt, const CirParse__DeclArray *declArr)
     for (size_t i = 0; i < declArr->len; i++) {
         const CirParse__DeclItem *item = &declArr->items[declArr->len - i - 1];
         switch (item->type) {
-        case CIRPARSE_DTPAREN:
-            cir_bug("TODO: handle CIRPARSE_DTPAREN");
+        case CIRPARSE_DTPAREN: {
+            bt = CirType_withAttrs(bt, partitionedAttributes.items[i].typeAttrs.items, partitionedAttributes.items[i].typeAttrs.len);
+            const CirType *unrolledBt = CirType_unroll(bt);
+            if (CirType_isFun(unrolledBt)) {
+                bt = CirType_withAttrs(bt, partitionedAttributes.items[i].funAttrs.items, partitionedAttributes.items[i].funAttrs.len);
+                partitionedAttributes.items[i].fadded = true;
+            } else {
+                partitionedAttributes.items[i].fadded = false;
+            }
             break;
+        }
         case CIRPARSE_DTPTR:
             bt = CirType__ptr(bt, item->attrs.items, item->attrs.len);
             break;
@@ -1593,6 +1759,32 @@ doType(bool for_typedef, const CirType *bt, const CirParse__DeclArray *declArr)
     for (size_t i = 0; i < declArr->len; i++) {
         const CirParse__DeclItem *item = &declArr->items[i];
         switch (item->type) {
+        case CIRPARSE_DTPAREN: {
+            // Add more type attributes
+            bt = CirType_withAttrs(bt, partitionedAttributes.items[i].typeAttrsR.items, partitionedAttributes.items[i].typeAttrsR.len);
+            // See if we can add more type attributes
+            const CirType *unrolledBt = CirType_unroll(bt);
+            if (CirType_isFun(unrolledBt)) {
+                if (!partitionedAttributes.items[i].fadded)
+                    bt = CirType_withAttrs(bt, partitionedAttributes.items[i].funAttrs.items, partitionedAttributes.items[i].funAttrs.len);
+                bt = CirType_withAttrs(bt, partitionedAttributes.items[i].funAttrsR.items, partitionedAttributes.items[i].funAttrsR.len);
+            } else if (CirType_isPtr(unrolledBt) && CirType_isFun(CirType_getBaseType(unrolledBt))) {
+                const CirType *funType = CirType_getBaseType(unrolledBt);
+                if (!partitionedAttributes.items[i].fadded)
+                    funType = CirType_withAttrs(funType, partitionedAttributes.items[i].funAttrs.items, partitionedAttributes.items[i].funAttrs.len);
+                funType = CirType_withAttrs(funType, partitionedAttributes.items[i].funAttrsR.items, partitionedAttributes.items[i].funAttrsR.len);
+                bt = CirType__ptr(funType, CirType_getAttrs(unrolledBt), CirType_getNumAttrs(unrolledBt));
+            } else {
+                if (partitionedAttributes.items[i].funAttrs.len && !partitionedAttributes.items[i].fadded)
+                    cir_fatal("Invalid position for (prefix) function type attributes");
+                if (partitionedAttributes.items[i].funAttrsR.len)
+                    cir_fatal("Invalid position for (post) function type attributes");
+            }
+            // Now add the name attributes
+            bt = CirType_withAttrs(bt, partitionedAttributes.items[i].nameAttrsR.items, partitionedAttributes.items[i].nameAttrsR.len);
+            bt = CirType_withAttrs(bt, partitionedAttributes.items[i].nameAttrs.items, partitionedAttributes.items[i].nameAttrs.len);
+            break;
+        }
         case CIRPARSE_DTPTR:
             // See if we can do anything with function type attributes
             if (!partitionedAttributes.items[i].funAttrs.len)

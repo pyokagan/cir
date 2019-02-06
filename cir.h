@@ -121,6 +121,11 @@ void CIRAPI(cir_warn)(const char *fmt, ...)
 void CIRAPI(cir_log)(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
 
+// TODO: Why is this a public API lol
+uint64_t CIRAPI(CirPrime_ge)(uint64_t target);
+
+void CirBreak(void);
+
 // CirMachine
 const CirMachine *CIRAPI(CirMachine_getBuild)(void);
 const CirMachine *CIRAPI(CirMachine_getHost)(void);
@@ -130,6 +135,10 @@ uint32_t CIRAPI(CirIkind_size)(uint32_t ikind, const CirMachine *);
 bool CIRAPI(CirIkind_isSigned)(uint32_t ikind, const CirMachine *);
 uint32_t CIRAPI(CirIkind_toUnsigned)(uint32_t ikind);
 uint32_t CIRAPI(CirIkind_fromSize)(uint32_t size, bool _unsigned, const CirMachine *);
+
+// CirFkind
+uint32_t CIRAPI(CirFkind_size)(uint32_t fkind, const CirMachine *);
+uint32_t CIRAPI(CirFkind_fromSize)(uint32_t size, const CirMachine *);
 
 // CirName
 CirName CIRAPI(CirName_of)(const char *);
@@ -261,6 +270,7 @@ size_t CIRAPI(CirValue_getNumFields)(const CirValue *);
 CirName CIRAPI(CirValue_getField)(const CirValue *, size_t);
 const CirValue *CIRAPI(CirValue_withFields)(const CirValue *, const CirName *fields, size_t len);
 CirVarId CIRAPI(CirValue_getVar)(const CirValue *);
+const CirValue *CIRAPI(CirValue_withVar)(const CirValue *, CirVarId);
 uint64_t CIRAPI(CirValue_computeBitsOffset)(const CirValue *, const CirMachine *);
 const CirType *CIRAPI(CirValue_getType)(const CirValue *);
 const CirType *CIRAPI(CirValue_getCastType)(const CirValue *);
@@ -276,6 +286,8 @@ void CIRAPI(CirStmt_toCall)(CirStmtId sid, const CirValue *dst, const CirValue *
 void CIRAPI(CirStmt_toReturn)(CirStmtId sid, const CirValue *value);
 void CIRAPI(CirStmt_toCmp)(CirStmtId sid, uint32_t condop, const CirValue *op1, const CirValue *op2, CirStmtId target);
 void CIRAPI(CirStmt_toGoto)(CirStmtId sid, CirStmtId jumpTarget);
+void CIRAPI(CirStmt_toBreak)(CirStmtId);
+void CIRAPI(CirStmt_toContinue)(CirStmtId);
 bool CIRAPI(CirStmt_isNop)(CirStmtId sid);
 bool CIRAPI(CirStmt_isUnOp)(CirStmtId sid);
 bool CIRAPI(CirStmt_isBinOp)(CirStmtId sid);
@@ -284,6 +296,8 @@ bool CIRAPI(CirStmt_isReturn)(CirStmtId sid);
 bool CIRAPI(CirStmt_isCmp)(CirStmtId sid);
 bool CIRAPI(CirStmt_isGoto)(CirStmtId sid);
 bool CIRAPI(CirStmt_isJump)(CirStmtId sid);
+bool CIRAPI(CirStmt_isBreak)(CirStmtId);
+bool CIRAPI(CirStmt_isContinue)(CirStmtId);
 uint32_t CIRAPI(CirStmt_getOp)(CirStmtId stmt_id);
 const CirValue *CIRAPI(CirStmt_getDst)(CirStmtId);
 const CirValue *CIRAPI(CirStmt_getOperand1)(CirStmtId);

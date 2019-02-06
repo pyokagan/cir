@@ -4,6 +4,8 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#define CIR_PRIVATE
+
 extern const char CirQuote__table[256][5];
 
 typedef void (*CirFmt)(const void *buf, size_t len);
@@ -56,6 +58,9 @@ CirFmt_printqb(CirFmt printer, const char *s, size_t len)
     }
     CirFmt_printString(printer, "\"");
 }
+
+// CirHash
+size_t CirHash_str(const char *);
 
 // Provides information on a machine
 typedef struct CirMachine {
@@ -341,6 +346,7 @@ void CirAttr__logArray(const CirAttr * const *attrs, size_t numAttrs);
 
 CirCodeId CirBuild__mul(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__div(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__mod(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__plus(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__arraySubscript(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__minus(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
@@ -352,9 +358,13 @@ CirCodeId CirBuild__gt(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__ge(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__eq(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__ne(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__land(CirCodeId lhs, CirCodeId rhs);
+CirCodeId CirBuild__lor(CirCodeId lhs, CirCodeId rhs);
 CirCodeId CirBuild__if(CirCodeId cond, CirCodeId thenBlock, CirCodeId elseBlock);
-CirCodeId CirBuild__while(CirCodeId cond, CirStmtId firstStmt, CirCodeId thenCode);
+CirCodeId CirBuild__for(CirCodeId cond, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode);
 CirCodeId CirBuild__lnot(CirCodeId);
+CirCodeId CirBuild__addrof(CirCodeId);
+CirCodeId CirBuild__deref(CirCodeId);
 
 size_t CirVar_getNum(void);
 size_t CirComp_getNum(void);

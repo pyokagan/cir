@@ -13,21 +13,10 @@ static struct Item hashTable[TABLE_SIZE];
 static const char *names[MAX_NAMES] = { "<name0>" };
 static uint32_t numNames = 1;
 
-static size_t
-hash(const char *str)
-{
-    size_t hash = 5381;
-    uint8_t c;
-
-    while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
-    return hash;
-}
-
 static struct Item *
 findItem(const char *name)
 {
-    for (size_t i = hash(name) % TABLE_SIZE; hashTable[i].key; i = (i + 1) % TABLE_SIZE) {
+    for (size_t i = CirHash_str(name) % TABLE_SIZE; hashTable[i].key; i = (i + 1) % TABLE_SIZE) {
         if (!strcmp(hashTable[i].key, name)) {
             return &hashTable[i];
         }
@@ -39,7 +28,7 @@ static void
 insertItem(const char *key, uint32_t value)
 {
     size_t i;
-    for (i = hash(key) % TABLE_SIZE; hashTable[i].key; i = (i + 1) % TABLE_SIZE);
+    for (i = CirHash_str(key) % TABLE_SIZE; hashTable[i].key; i = (i + 1) % TABLE_SIZE);
     hashTable[i].key = key;
     hashTable[i].value = value;
 }

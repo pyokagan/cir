@@ -55,13 +55,9 @@ Here is a program which prints the 20th number in the Fibonacci sequence:
 #include <stdio.h>
 
 static int fib(int n) {
-    int a, b, i;
-    a = 0;
-    b = 1;
-    i = 0;
+    int a = 0, b = 1, i = 0;
     while (i < n) {
-        int c;
-        c = b;
+        int c = b;
         b = a + b;
         a = c;
         i = i + 1;
@@ -184,13 +180,9 @@ Here is the modified `fib.c` source file with the `@` operator added:
 #include <stdio.h>
 
 static int fib(int n) {
-    int a, b, i;
-    a = 0;
-    b = 1;
-    i = 0;
+    int a = 0, b = 1, i = 0;
     while (i < n) {
-        int c;
-        c = b;
+        int c = b;
         b = a + b;
         a = c;
         i = i + 1;
@@ -237,21 +229,20 @@ For example, here is a compile-time function that reads a file using C standard 
 [source,c]
 ----
 #include <stdio.h>
+#include <stdlib.h>
 #include "../cir.h" // include compiler API
-
-extern void *calloc (size_t __nmemb, size_t __size);
 
 // Reads a file and returns it as a string constant
 static CirCodeId readFile(char *path) {
-    FILE *fp;
-    size_t len;
-    char *buffer;
-    fp = fopen(path, "r");
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        cir_fatal("failed to open %s", path);
     fseek(fp, 0, SEEK_END);
-    len = ftell(fp);
+    size_t len = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    buffer = calloc(len + 1, 1);
+    char *buffer = malloc(len + 1);
     fread(buffer, len, 1, fp);
+    buffer[len] = 0;
     fclose(fp);
     return CirCode_ofExpr(CirValue_ofString(buffer, len + 1));
 }
@@ -284,19 +275,18 @@ and examines the IR contained within:
 
 [source,c]
 ----
-#include "cir.h" // include compiler API
+#include <stdbool.h>
+#include "../cir.h" // include compiler API
 
 // Returns true if code calls a function, otherwise returns false
-static int callsAFunction(CirCodeId code) {
-    CirStmtId stmt;
-    stmt = CirCode_getFirstStmt(code);
+static bool callsAFunction(CirCodeId code) {
+    CirStmtId stmt = CirCode_getFirstStmt(code);
     while (stmt) {
-        if (CirStmt_isCall(stmt)) {
-            return 1;
-        }
+        if (CirStmt_isCall(stmt))
+            return true;
         stmt = CirStmt_getNext(stmt);
     }
-    return 0;
+    return false;
 }
 ----
 

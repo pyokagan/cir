@@ -227,6 +227,16 @@ CirValue_getVar(const CirValue *value)
     return varValue->vid;
 }
 
+const CirValue *
+CirValue_withVar(const CirValue *value, CirVarId newVarId)
+{
+    if (!CirValue_isLval(value))
+        cir_bug("CirValue_withVar: not an lval");
+    const CirValueVar *varValue = (const CirValueVar *)value;
+    size_t numFields = CirValue_getNumFields(value);
+    return makeVarValue(newVarId, data1ToType(varValue->data1), varValue->fields, numFields, varValue->type);
+}
+
 const CirType *
 CirValue_computeTypeAndBitsOffset(const CirValue *value, uint64_t *offset, const CirMachine *mach)
 {
