@@ -1,5 +1,6 @@
 #include "cir_internal.h"
 #include <assert.h>
+#include <stdalign.h>
 
 #define CIRATTR_INT 1
 #define CIRATTR_STR 2
@@ -44,7 +45,7 @@ typedef struct CirAttrCons {
 const CirAttr *
 CirAttr_int(int32_t i)
 {
-    CirAttrInt *attr = cir__balloc(sizeof(*attr));
+    CirAttrInt *attr = CirMem_balloc(sizeof(*attr), alignof(*attr));
     attr->data1 = typeToData1(CIRATTR_INT);
     attr->i = i;
     return (CirAttr *)attr;
@@ -53,7 +54,7 @@ CirAttr_int(int32_t i)
 const CirAttr *
 CirAttr_str(const char *s)
 {
-    CirAttrStr *attr = cir__balloc(sizeof(*attr));
+    CirAttrStr *attr = CirMem_balloc(sizeof(*attr), alignof(*attr));
     attr->data1 = typeToData1(CIRATTR_STR);
     attr->s = s;
     return (CirAttr *)attr;
@@ -62,7 +63,7 @@ CirAttr_str(const char *s)
 const CirAttr *
 CirAttr_name(CirName name)
 {
-    CirAttrName *attr = cir__balloc(sizeof(*attr));
+    CirAttrName *attr = CirMem_balloc(sizeof(*attr), alignof(*attr));
     attr->data1 = typeToData1(CIRATTR_NAME);
     attr->name = name;
     return (CirAttr *)attr;
@@ -74,7 +75,7 @@ CirAttr_cons(CirName name, const CirAttr **args, size_t len)
     if (len > MAX_CONS_ARGS)
         cir_bug("Too many attr args");
 
-    CirAttrCons *attr = cir__balloc(sizeof(*attr) + sizeof(CirAttr *) * len);
+    CirAttrCons *attr = CirMem_balloc(sizeof(*attr) + sizeof(CirAttr *) * len, alignof(*attr));
     attr->data1 = typeToData1(CIRATTR_CONS) | numArgsToData1(len);
     attr->name = name;
     for (uint32_t i = 0; i < len; i++)

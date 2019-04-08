@@ -55,6 +55,8 @@ CirFmt_printqb(CirFmt printer, const char *s, size_t len)
     for (size_t i = 0; i < len; i++) {
         uint8_t c = s[i];
         CirFmt_printString(printer, CirQuote__table[c]);
+        if (c >= 127)
+            CirFmt_printString(printer, "\"\"");
     }
     CirFmt_printString(printer, "\"");
 }
@@ -74,6 +76,7 @@ typedef struct CirMachine {
     unsigned sizeofFloat;
     unsigned sizeofDouble;
     unsigned sizeofLongDouble;
+    unsigned sizeofFloat128;
     unsigned sizeofVoid;
     unsigned sizeofFun;
     unsigned sizeofSizeT;
@@ -87,6 +90,7 @@ typedef struct CirMachine {
     unsigned alignofFloat;
     unsigned alignofDouble;
     unsigned alignofLongDouble;
+    unsigned alignofFloat128;
     unsigned alignofFun;
     bool charIsUnsigned;
 } CirMachine;
@@ -104,6 +108,7 @@ typedef struct CirToken {
         // Idents
         CIRTOK_IDENT,
         CIRTOK_TYPENAME,
+        CIRTOK_BUILTIN,
 
         // Literals
         CIRTOK_STRINGLIT,
@@ -201,6 +206,8 @@ typedef struct CirToken {
         CIRTOK_RESTRICT, // restrict
         CIRTOK_BUILTIN_VA_LIST, // __builtin_va_list
         CIRTOK_SIZEOF, // sizeof
+        CIRTOK_TYPEVAL, // __typeval
+        CIRTOK_FLOAT128, // _Float128
     } type;
     union {
         CirName name; // CIRTOK_IDENT, CIRTOK_TYPENAME
@@ -216,6 +223,7 @@ typedef struct CirToken {
             char *buf;
             size_t len;
         } stringlit; // CIRTOK_STRINGLIT
+        CirBuiltinId builtinId; // CIRTOK_BUILTIN
     } data;
 } CirToken;
 
@@ -223,11 +231,9 @@ extern CirToken cirtok;
 
 // via malloc
 void *cir__xalloc(size_t n) __attribute__((malloc));
+void *cir__zalloc(size_t n) __attribute__((malloc));
 void *cir__xrealloc(void *, size_t);
 void cir__xfree(void *);
-
-// Bump allocator
-void *cir__balloc(size_t n) __attribute__((malloc));
 
 // Line numbering
 void CirLog__announceNewLine(void);
@@ -242,6 +248,7 @@ const CirType *CirType__int(uint32_t ikind, const CirAttr * const *attrs, uint32
 const CirType *CirType__float(uint32_t fkind, const CirAttr * const *attrs, uint32_t numAttrs);
 const CirType *CirType__typedef(CirTypedefId, const CirAttr * const *attrs, uint32_t numAttrs);
 const CirType *CirType__comp(CirCompId, const CirAttr * const *attrs, uint32_t numAttrs);
+const CirType *CirType__enum(CirEnumId, const CirAttr * const *attrs, uint32_t numAttrs);
 const CirType *CirType__ptr(const CirType *, const CirAttr * const *attrs, size_t numAttrs);
 const CirType *CirType__array(const CirType *, const CirAttr * const *attrs, uint32_t numAttrs);
 const CirType *CirType__arrayWithLen(const CirType *, uint32_t len, const CirAttr * const *attrs, uint32_t numAttrs);
@@ -253,11 +260,13 @@ const CirType *CirType__integralPromotion(const CirType *, const CirMachine *);
 const CirType *CirType__arithmeticConversion(const CirType *t1, const CirType *t2, const CirMachine *);
 void CirType_print(CirFmt printer, const CirType *, const char *name, CirCodeId code_id, bool forRender);
 const CirType *CirValue_computeTypeAndBitsOffset(const CirValue *value, uint64_t *offset, const CirMachine *mach);
+uint64_t CirValue_computeBitsOffset(const CirValue *value, const CirMachine *);
+const CirType *CirType_ofUnOp(uint32_t unop, const CirType *t1, const CirMachine *);
+const CirType *CirType_ofBinOp(uint32_t binop, const CirType *t1, const CirType *t2, const CirMachine *);
+const CirType *CirType_ofCall(const CirType *);
 
 void CirVar__setCode(CirVarId, CirCodeId);
 void CirVar__setOwner(CirVarId, CirCodeId);
-void CirVar__setStackOffset(CirVarId, int32_t);
-int32_t CirVar__getStackOffset(CirVarId);
 const CirVarId *CirVar__getFormals(CirVarId);
 void CirVar_printLval(CirFmt, CirVarId, bool forRender);
 void CirVar_printDecl(CirFmt, CirVarId, bool forRender);
@@ -270,16 +279,27 @@ void CirComp__markIsomorphic(CirCompId, CirCompId);
 void CirComp__unmarkIsomorphic(CirCompId, CirCompId);
 
 // Env
-void CirEnv__pushScope(void);
+void CirEnv__pushScope(size_t tableSize);
+void CirEnv__pushGlobalScope(void);
+void CirEnv__pushLocalScope(void);
 void CirEnv__popScope(void);
 bool CirEnv__isGlobal(void);
-int CirEnv__findLocalName(CirName, CirVarId *, CirTypedefId *);
-int CirEnv__findGlobalName(CirName, CirVarId *, CirTypedefId *);
-int CirEnv__findCurrentScopeName(CirName, CirVarId *, CirTypedefId *);
+int CirEnv__findLocalName(CirName, CirVarId *, CirTypedefId *, CirEnumItemId *);
+int CirEnv__findGlobalName(CirName, CirVarId *, CirTypedefId *, CirEnumItemId *);
+int CirEnv__findCurrentScopeName(CirName, CirVarId *, CirTypedefId *, CirEnumItemId *);
 void CirEnv__setLocalNameAsVar(CirVarId);
 void CirEnv__setLocalNameAsTypedef(CirTypedefId);
-int CirEnv__findLocalTag(CirName, CirCompId *);
+void CirEnv__setLocalNameAsEnumItem(CirEnumItemId);
+int CirEnv__findLocalTag(CirName, CirCompId *, CirEnumId *);
 void CirEnv__setLocalTagAsComp(CirCompId);
+void CirEnv__setLocalTagAsEnum(CirEnumId);
+
+// CirLoopEnv
+void CirLoopEnv_pushLoop(CirStmtId continueStmtId, CirStmtId breakStmtId);
+void CirLoopEnv_pushSwitch(CirStmtId breakStmtId);
+void CirLoopEnv_pop(void);
+CirStmtId CirLoopEnv_getContinueStmtId(void);
+CirStmtId CirLoopEnv_getBreakStmtId(void);
 
 // Lexer
 void CirLex__init(const char *path, const CirMachine *);
@@ -361,10 +381,13 @@ CirCodeId CirBuild__ne(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
 CirCodeId CirBuild__land(CirCodeId lhs, CirCodeId rhs);
 CirCodeId CirBuild__lor(CirCodeId lhs, CirCodeId rhs);
 CirCodeId CirBuild__if(CirCodeId cond, CirCodeId thenBlock, CirCodeId elseBlock);
-CirCodeId CirBuild__for(CirCodeId cond, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode);
+CirCodeId CirBuild__for(CirCodeId cond, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode, CirStmtId restStmt);
 CirCodeId CirBuild__lnot(CirCodeId);
 CirCodeId CirBuild__addrof(CirCodeId);
 CirCodeId CirBuild__deref(CirCodeId);
+CirCodeId CirBuild__lshift(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__rshift(CirCodeId lhs, CirCodeId rhs, const CirMachine *);
+CirCodeId CirBuild__ternary(CirCodeId cond, CirCodeId thenCode, CirCodeId elseCode, const CirMachine *mach);
 
 size_t CirVar_getNum(void);
 size_t CirComp_getNum(void);
@@ -375,8 +398,11 @@ size_t CirStmt_getNum(void);
 CirCodeId CirX64_call(CirVarId vid, const CirCodeId *, size_t);
 void CirX64_test(void);
 
+void CirDl_loadLibrary(const char *filename);
 bool CirDl_findSymbol(const char *name, void **out);
 
 void CirRender(void);
+
+void CirBuiltin_init(const CirMachine *);
 
 #endif // CIR_INTERNAL_H

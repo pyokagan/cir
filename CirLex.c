@@ -512,6 +512,42 @@ loop:
         cirtok.data.stringlit.buf = strbuf;
         cirtok.data.stringlit.len = strbufLen;
         return;
+    } else if (CirLex__startsWith("R\"")) {
+        // Raw string literal
+        char delim[19];
+        delim[0] = ')';
+        CirLex__advance(2); // consume R"
+        size_t i = 1;
+        for (; !CirLex__eof() && CirLex__c() != '('; CirLex__advance(1), i++) {
+            if (i >= 17)
+                cir_fatal("lexer error: raw string delimiter too long");
+            char c = CirLex__c();
+            if (c == ')' || c == '\\' || isspace(c))
+                cir_fatal("lexer error: invalid raw string delimiter character: %c", c);
+            delim[i] = c;
+        }
+        if (CirLex__eof())
+            cir_fatal("lexer error: unterminated raw string at eof");
+        delim[i++] = '"';
+        size_t delimLen = i;
+        delim[i++] = '\0';
+        strbufLen = 0;
+        assert(CirLex__c() == '(');
+        CirLex__advance(1); // consume (
+        while (!CirLex__eof() && !CirLex__startsWith(delim)) {
+            char c = CirLex__c();
+            if (strbufLen >= STRING_BUF_SIZE)
+                cir_fatal("lexer error: string literal is too long");
+            strbuf[strbufLen++] = c;
+            CirLex__advance(1);
+        }
+        if (CirLex__eof())
+            cir_fatal("lexer error: unterminated raw string at eof");
+        CirLex__advance(delimLen);
+        cirtok.type = CIRTOK_STRINGLIT;
+        cirtok.data.stringlit.buf = strbuf;
+        cirtok.data.stringlit.len = strbufLen;
+        return;
     } else if (CirLex__startsWith("0x") || CirLex__startsWith("0X")) {
         // Hexadecimal number
         CirLex__advance(2);
@@ -538,7 +574,7 @@ loop:
         // Octal number
         uint64_t val = 0;
         bool hasOverflow = false;
-        while (!CirLex__eof() && isoctal(CirLex__c())) {
+        for (int i = 0; i < 3 && !CirLex__eof() && isoctal(CirLex__c()); i++) {
             if (__builtin_mul_overflow(val, 8, &val))
                 hasOverflow = true;
             uint64_t b = CirLex__c() - '0';
@@ -826,7 +862,7 @@ loop:
         } else if (!strcmp(strbuf, "__auto_type")) {
             cirtok.type = CIRTOK_AUTO_TYPE;
             return;
-        } else if (!strcmp(strbuf, "inline")) {
+        } else if (!strcmp(strbuf, "inline") || !strcmp(strbuf, "__inline__") || !strcmp(strbuf, "__inline")) {
             cirtok.type = CIRTOK_INLINE;
             return;
         } else if (!strcmp(strbuf, "__attribute__")) {
@@ -852,19 +888,34 @@ loop:
             // should be handled in GNU-C mode.
             // However, we already try to support GNU C extensions whether __extension__ is used or not.
             goto loop;
+        } else if (!strcmp(strbuf, "_Alignof") || !strcmp(strbuf, "__alignof__")) {
+            cirtok.type = CIRTOK_ALIGNOF;
+            return;
+        } else if (!strcmp(strbuf, "__typeval")) {
+            cirtok.type = CIRTOK_TYPEVAL;
+            return;
+        } else if (!strcmp(strbuf, "_Float128")) {
+            cirtok.type = CIRTOK_FLOAT128;
+            return;
         }
 
         // Convert to name
         CirName name = CirName_of(strbuf);
         CirVarId vid;
         CirTypedefId tid;
+        CirEnumItemId enumItemId;
+        CirBuiltinId builtinId;
 
-        if (CirEnv__findLocalName(name, &vid, &tid) == 2) {
+        if ((builtinId = CirBuiltin_ofName(name))) {
+            // Is a builtin
+            cirtok.type = CIRTOK_BUILTIN;
+            cirtok.data.builtinId = builtinId;
+        } else if (CirEnv__findLocalName(name, &vid, &tid, &enumItemId) == 2) {
             // Is a type
             cirtok.type = CIRTOK_TYPENAME;
             cirtok.data.name = name;
         } else {
-            // Is an ident
+            // Is an ident / enum item
             cirtok.type = CIRTOK_IDENT;
             cirtok.data.name = name;
         }
@@ -887,6 +938,8 @@ CirLex__str(uint32_t tt)
         return "IDENT";
     case CIRTOK_TYPENAME:
         return "TYPENAME";
+    case CIRTOK_BUILTIN:
+        return "BUILTIN";
     case CIRTOK_STRINGLIT:
         return "STRINGLIT";
     case CIRTOK_CHARLIT:
@@ -1069,6 +1122,10 @@ CirLex__str(uint32_t tt)
         return "BUILTIN_VA_LIST";
     case CIRTOK_SIZEOF:
         return "SIZEOF";
+    case CIRTOK_TYPEVAL:
+        return "TYPEVAL";
+    case CIRTOK_FLOAT128:
+        return "_Float128";
     default:
         cir_bug("invalid token type");
     }

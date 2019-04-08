@@ -1,6 +1,7 @@
 #include "cir_internal.h"
 #include <assert.h>
 #include <stdalign.h>
+#include <stdlib.h>
 
 // data1:
 // bits 31 to 28: type
@@ -17,7 +18,8 @@
 #define CIR_TFUN 5
 #define CIR_TNAMED 6
 #define CIR_TCOMP 7
-#define CIR_TVALIST 8
+#define CIR_TENUM 8
+#define CIR_TVALIST 9
 
 #define data1ToType(x) (((x) >> 28) & 0x0f)
 #define typeToData1(x) (((x) & 0x0f) << 28)
@@ -59,6 +61,12 @@ typedef struct CirTypeComp {
     CirCompId compId;
     const CirAttr *attrs[];
 } CirTypeComp;
+
+typedef struct CirTypeEnum {
+    uint32_t data1;
+    CirEnumId enumId;
+    const CirAttr *attrs[];
+} CirTypeEnum;
 
 typedef struct CirTypeFun {
     uint32_t data1;
@@ -115,6 +123,9 @@ static const CirType doubleType = {
 };
 static const CirType longdoubleType = {
     .data1 = typeToData1(CIR_TFLOAT) | u1ToData1(CIR_FLONGDOUBLE),
+};
+static const CirType f128Type = {
+    .data1 = typeToData1(CIR_TFLOAT) | u1ToData1(CIR_F128),
 };
 static const CirType valistType = {
     .data1 = typeToData1(CIR_TVALIST),
@@ -188,6 +199,13 @@ CirType_isComp(const CirType *type)
 }
 
 bool
+CirType_isEnum(const CirType *type)
+{
+    assert(type);
+    return data1ToType(type->data1) == CIR_TENUM;
+}
+
+bool
 CirType_isVaList(const CirType *type)
 {
     assert(type);
@@ -230,6 +248,16 @@ CirType_getCompId(const CirType *type)
     return ((const CirTypeComp *)type)->compId;
 }
 
+CirEnumId
+CirType_getEnumId(const CirType *type)
+{
+    assert(type);
+    if (data1ToType(type->data1) != CIR_TENUM)
+        cir_fatal("CirType_getEnumId called on non-enum type");
+
+    return ((const CirTypeEnum *)type)->enumId;
+}
+
 static void
 copyAttrs(const CirAttr ** restrict dst, const CirAttr * const * restrict src, uint32_t numAttrs)
 {
@@ -248,7 +276,7 @@ CirType__void(const CirAttr * const *attrs, uint32_t numAttrs)
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
 
-    CirType *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirType *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TVOID) | numAttrsToData1(numAttrs);
     copyAttrs(out->attrs, attrs, numAttrs);
     return out;
@@ -267,7 +295,7 @@ CirType__int(uint32_t ikind, const CirAttr * const *attrs, uint32_t numAttrs)
         cir_bug("too many attrs");
 
     if (numAttrs) {
-        CirType *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+        CirType *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
         out->data1 = typeToData1(CIR_TINT) | u1ToData1(ikind) | numAttrsToData1(numAttrs);
         copyAttrs(out->attrs, attrs, numAttrs);
         return out;
@@ -316,7 +344,7 @@ CirType__float(uint32_t fkind, const CirAttr * const *attrs, uint32_t numAttrs)
         cir_bug("too many attrs");
 
     if (numAttrs) {
-        CirType *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+        CirType *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
         out->data1 = typeToData1(CIR_TFLOAT) | u1ToData1(fkind) | numAttrsToData1(numAttrs);
         copyAttrs(out->attrs, attrs, numAttrs);
         return out;
@@ -329,6 +357,8 @@ CirType__float(uint32_t fkind, const CirAttr * const *attrs, uint32_t numAttrs)
         return &doubleType;
     case CIR_FLONGDOUBLE:
         return &longdoubleType;
+    case CIR_F128:
+        return &f128Type;
     default:
         cir_bug("invalid fkind");
     }
@@ -346,7 +376,7 @@ CirType__typedef(CirTypedefId tid, const CirAttr * const *attrs, uint32_t numAtt
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
 
-    CirTypeNamed *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirTypeNamed *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TNAMED) | numAttrsToData1(numAttrs);
     out->typedefId = tid;
     copyAttrs(out->attrs, attrs, numAttrs);
@@ -365,7 +395,7 @@ CirType__comp(CirCompId cid, const CirAttr * const *attrs, uint32_t numAttrs)
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
 
-    CirTypeComp *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirTypeComp *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TCOMP) | numAttrsToData1(numAttrs);
     out->compId = cid;
     copyAttrs(out->attrs, attrs, numAttrs);
@@ -379,12 +409,31 @@ CirType_comp(CirCompId cid)
 }
 
 const CirType *
+CirType__enum(CirEnumId enumId, const CirAttr * const *attrs, uint32_t numAttrs)
+{
+    if (numAttrs > MAX_ATTRS)
+        cir_bug("too many attrs");
+
+    CirTypeEnum *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
+    out->data1 = typeToData1(CIR_TENUM) | numAttrsToData1(numAttrs);
+    out->enumId = enumId;
+    copyAttrs(out->attrs, attrs, numAttrs);
+    return (CirType *)out;
+}
+
+const CirType *
+CirType_enum(CirEnumId enumId)
+{
+    return CirType__enum(enumId, NULL, 0);
+}
+
+const CirType *
 CirType__ptr(const CirType *bt, const CirAttr * const *attrs, size_t numAttrs)
 {
     assert(bt != NULL);
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
-    CirTypePtr *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirTypePtr *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TPTR) | numAttrsToData1(numAttrs);
     out->baseType = bt;
     copyAttrs(out->attrs, attrs, numAttrs);
@@ -403,7 +452,7 @@ CirType__array(const CirType *bt, const CirAttr * const *attrs, uint32_t numAttr
     assert(bt != NULL);
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
-    CirTypeArray *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirTypeArray *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TARRAY) | numAttrsToData1(numAttrs);
     out->arrayLen = 0;
     out->baseType = bt;
@@ -423,7 +472,7 @@ CirType__arrayWithLen(const CirType *bt, uint32_t len, const CirAttr * const *at
     assert(bt != NULL);
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
-    CirTypeArray *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirTypeArray *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TARRAY) | u2ToData1(1) | numAttrsToData1(numAttrs);
     out->arrayLen = len;
     out->baseType = bt;
@@ -445,7 +494,7 @@ CirType__fun(const CirType *bt, const CirFunParam *params, size_t numParams, boo
         cir_bug("too many attrs");
     if (numParams > MAX_FUN_PARAMS)
         cir_bug("too many params");
-    CirTypeFun *out = cir__balloc(sizeof(*out) + sizeof(*params) * numParams + sizeof(*attrs) * numAttrs);
+    CirTypeFun *out = CirMem_balloc(sizeof(*out) + sizeof(*params) * numParams + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TFUN) | u1ToData1(numParams) | u2ToData1(isVa) | numAttrsToData1(numAttrs);
     out->baseType = bt;
     // Copy params
@@ -471,7 +520,7 @@ CirType__valist(const CirAttr * const *attrs, size_t numAttrs)
     if (numAttrs > MAX_ATTRS)
         cir_bug("too many attrs");
 
-    CirType *out = cir__balloc(sizeof(*out) + sizeof(*attrs) * numAttrs);
+    CirType *out = CirMem_balloc(sizeof(*out) + sizeof(*attrs) * numAttrs, alignof(*out));
     out->data1 = typeToData1(CIR_TVALIST) | numAttrsToData1(numAttrs);
     copyAttrs(out->attrs, attrs, numAttrs);
     return out;
@@ -520,6 +569,7 @@ CirType_unrollDeep(const CirType *t)
     case CIR_TFLOAT:
     case CIR_TVALIST:
     case CIR_TCOMP:
+    case CIR_TENUM:
         // Leaf
         return t;
     case CIR_TNAMED: {
@@ -608,6 +658,8 @@ CirType_getAttrs(const CirType *t)
         return ((const CirTypeNamed *)t)->attrs;
     case CIR_TCOMP:
         return ((const CirTypeComp *)t)->attrs;
+    case CIR_TENUM:
+        return ((const CirTypeEnum *)t)->attrs;
     default:
         cir_bug("unknown type???");
     }
@@ -642,6 +694,7 @@ CirType_replaceAttrs(const CirType *t, const CirAttr *const *attrs, size_t numAt
     const CirTypeNamed *tmpNamed;
     const CirTypeComp *tmpComp;
     const CirTypeArray *tmpArray;
+    const CirTypeEnum *tmpEnum;
     switch (data1ToType(t->data1)) {
     case CIR_TVOID:
         return CirType__void(attrs, numAttrs);
@@ -655,6 +708,9 @@ CirType_replaceAttrs(const CirType *t, const CirAttr *const *attrs, size_t numAt
     case CIR_TCOMP:
         tmpComp = (const CirTypeComp *)t;
         return CirType__comp(tmpComp->compId, attrs, numAttrs);
+    case CIR_TENUM:
+        tmpEnum = (const CirTypeEnum *)t;
+        return CirType__enum(tmpEnum->enumId, attrs, numAttrs);
     case CIR_TPTR:
         bt = CirType_getBaseType(t);
         return CirType__ptr(bt, attrs, numAttrs);
@@ -919,6 +975,10 @@ CirType_alignof(const CirType *t, const CirMachine *mach)
     } else if (CirType_isComp(t)) {
         CirCompId cid = CirType_getCompId(t);
         return CirComp_getAlign(cid, mach);
+    } else if (CirType_isEnum(t)) {
+        CirEnumId enumId = CirType_getEnumId(t);
+        uint32_t ikind = CirEnum_getIkind(enumId);
+        return CirType_alignof(CirType_int(ikind), mach);
     } else if (CirType_isFun(t)) {
         if (mach->compiler == CIR_GCC) {
             return mach->alignofFun;
@@ -955,6 +1015,10 @@ CirType_sizeof(const CirType *t, const CirMachine *mach)
     } else if (CirType_isComp(t)) {
         CirCompId cid = CirType_getCompId(t);
         return CirComp_getSize(cid, mach);
+    } else if (CirType_isEnum(t)) {
+        CirEnumId enumId = CirType_getEnumId(t);
+        uint32_t ikind = CirEnum_getIkind(enumId);
+        return CirType_sizeof(CirType_int(ikind), mach);
     } else if (CirType_isArray(t)) {
         if (CirType_hasArrayLen(t)) {
             uint32_t len = CirType_getArrayLen(t);
@@ -1031,6 +1095,18 @@ CirType_printLhs(CirFmt printer, const CirType *t, bool needSpace)
         }
         goto finish;
     }
+    case CIR_TENUM: {
+        const CirTypeEnum *enumType = (const CirTypeEnum *)t;
+        CirEnumId enumId = enumType->enumId;
+        CirFmt_printString(printer, "enum eid");
+        CirFmt_printU32(printer, enumId);
+        CirName name = CirEnum_getName(enumId);
+        if (name) {
+            CirFmt_printString(printer, "_");
+            CirFmt_printString(printer, CirName_cstr(name));
+        }
+        goto finish;
+    }
     case CIR_TPTR: {
         const CirType *bt = CirType_getBaseType(t);
         bool needParen = CirType_isFun(bt) || CirType_isArray(bt);
@@ -1078,6 +1154,7 @@ loop:
     case CIR_TFLOAT:
     case CIR_TNAMED:
     case CIR_TCOMP:
+    case CIR_TENUM:
         return;
 
     case CIR_TPTR: {
@@ -1157,6 +1234,64 @@ CirType_log(const CirType *tt, const char *name)
     CirType_print(CirLog_printb, tt, name, 0, false);
 }
 
+bool
+CirType_equals(const CirType *aType, const CirType *bType)
+{
+    assert(aType);
+    assert(bType);
+
+    if (aType == bType)
+        return true;
+
+    uint32_t aType_type = data1ToType(aType->data1);
+    uint32_t bType_type = data1ToType(bType->data1);
+    if (aType_type != bType_type)
+        return false;
+
+    // Need to recurse to structurally compare as needed
+    // TODO: Compare attrs as well
+    switch (aType_type) {
+    case CIR_TVOID:
+        return true;
+    case CIR_TINT:
+        return data1ToU1(aType->data1) == data1ToU1(bType->data1);
+    case CIR_TFLOAT:
+        return data1ToU1(aType->data1) == data1ToU1(bType->data1);
+    case CIR_TPTR:
+        return CirType_equals(CirType_getBaseType(aType), CirType_getBaseType(bType));
+    case CIR_TARRAY:
+        if (CirType_hasArrayLen(aType) != CirType_hasArrayLen(bType))
+            return false;
+        if (CirType_hasArrayLen(aType) && CirType_getArrayLen(aType) != CirType_getArrayLen(bType))
+            return false;
+        return CirType_equals(CirType_getBaseType(aType), CirType_getBaseType(bType));
+    case CIR_TFUN: {
+        if (CirType_getNumParams(aType) != CirType_getNumParams(bType))
+            return false;
+        if (CirType_isParamsVa(aType) != CirType_isParamsVa(bType))
+            return false;
+        size_t numParams = CirType_getNumParams(aType);
+        const CirFunParam *aParams = CirType_getParams(aType);
+        const CirFunParam *bParams = CirType_getParams(bType);
+        for (size_t i = 0; i < numParams; i++) {
+            if (!CirType_equals(aParams[i].type, bParams[i].type))
+                return false;
+        }
+        return CirType_equals(CirType_getBaseType(aType), CirType_getBaseType(bType));
+    }
+    case CIR_TNAMED:
+        return CirType_getTypedefId(aType) == CirType_getTypedefId(bType);
+    case CIR_TCOMP:
+        return CirType_getCompId(aType) == CirType_getCompId(bType);
+    case CIR_TENUM:
+        return CirType_getEnumId(aType) == CirType_getEnumId(bType);
+    case CIR_TVALIST:
+        return true;
+    default:
+        cir_bug("unhandled case");
+    }
+}
+
 const CirType *
 CirType__combine(const CirType *oldt, const CirType *t)
 {
@@ -1181,6 +1316,10 @@ CirType__combine(const CirType *oldt, const CirType *t)
         if (oldfkind != fkind)
             return NULL; // different floating point types
         return CirType_withAttrs(oldt, attrs, attrs_len);
+    } else if (oldt_type == CIR_TENUM && t_type == CIR_TENUM) {
+        CirEnumId enumId = CirType_getEnumId(t);
+        const CirType *newT = CirType__enum(enumId, oldattrs, oldattrs_len);
+        return CirType_withAttrs(newT, attrs, attrs_len);
     } else if (oldt_type == CIR_TCOMP && t_type == CIR_TCOMP) {
         CirCompId oldcid = ((const CirTypeComp *)oldt)->compId;
         CirCompId cid = ((const CirTypeComp *)t)->compId;
@@ -1269,6 +1408,8 @@ comp_fail:
             return NULL; // different number of arguments
 
         const CirType *newbt = CirType__combine(CirType_getBaseType(oldt), CirType_getBaseType(t));
+        if (!newbt)
+            return NULL;
 
         // Go over the arguments and update the names and types
         CirArray(CirFunParam) newParams = CIRARRAY_INIT;
@@ -1315,5 +1456,118 @@ fun_fail:
         return CirType_withAttrs(ret, attrs, attrs_len);
     } else {
         return NULL; // different type constructors
+    }
+}
+
+CIR_PRIVATE
+const CirType *
+CirType_ofUnOp(uint32_t unop, const CirType *t1, const CirMachine *mach)
+{
+    switch (unop) {
+    case CIR_UNOP_NEG: {
+        const CirType *unrolledType = CirType_unroll(t1);
+        if (CirType_isInt(unrolledType))
+            return CirType__integralPromotion(t1, mach);
+        else if (CirType_isFloat(unrolledType))
+            return t1;
+        else
+            cir_fatal("CIR_UNOP_NEG: must have arithmetic type");
+    }
+    case CIR_UNOP_BNOT:
+        return CirType__integralPromotion(t1, mach);
+    case CIR_UNOP_LNOT:
+        return CirType_int(CIR_IINT);
+    case CIR_UNOP_ADDROF: {
+        const CirType *unrolledType = CirType_unroll(t1);
+        if (CirType_isArray(unrolledType) || CirType_isFun(unrolledType))
+            return CirType_lvalConv(t1);
+        else
+            return CirType_ptr(t1);
+    }
+    case CIR_UNOP_IDENTITY:
+        // CIR-specific unop: exact pass-through of the type
+        return t1;
+    default:
+        cir_bug("unhandled unop");
+    }
+}
+
+CIR_PRIVATE
+const CirType *
+CirType_ofBinOp(uint32_t binop, const CirType *lhs, const CirType *rhs, const CirMachine *mach)
+{
+    switch (binop) {
+    case CIR_BINOP_PLUS: {
+        lhs = CirType_lvalConv(lhs);
+        rhs = CirType_lvalConv(rhs);
+        const CirType *lhs_unrolled = CirType_unroll(lhs);
+        const CirType *rhs_unrolled = CirType_unroll(rhs);
+        if (CirType_isArithmetic(lhs_unrolled) && CirType_isArithmetic(rhs_unrolled)) {
+            return CirType__arithmeticConversion(lhs, rhs, mach);
+        } else if (CirType_isPtr(lhs_unrolled) && CirType_isInt(rhs_unrolled)) {
+            return lhs;
+        } else if (CirType_isInt(lhs_unrolled) && CirType_isPtr(rhs_unrolled)) {
+            return rhs;
+        } else {
+            cir_fatal("CIR_BINOP_PLUS: operands have invalid type");
+        }
+    }
+    case CIR_BINOP_MINUS: {
+        lhs = CirType_lvalConv(lhs);
+        rhs = CirType_lvalConv(rhs);
+        const CirType *lhs_unrolled = CirType_unroll(lhs);
+        const CirType *rhs_unrolled = CirType_unroll(rhs);
+        if (CirType_isArithmetic(lhs_unrolled) && CirType_isArithmetic(rhs_unrolled)) {
+            return CirType__arithmeticConversion(lhs, rhs, mach);
+        } else if (CirType_isPtr(lhs_unrolled) && CirType_isInt(rhs_unrolled)) {
+            return lhs;
+        } else if (CirType_isPtr(lhs_unrolled) && CirType_isPtr(rhs_unrolled)) {
+            return CirType_int(CirIkind_fromSize(mach->sizeofPtr, false, mach));
+        } else {
+            cir_fatal("CIR_BINOP_MINUS: operands have invalid type");
+        }
+    }
+    case CIR_BINOP_MUL:
+        return CirType__arithmeticConversion(lhs, rhs, mach);
+    case CIR_BINOP_DIV:
+        return CirType__arithmeticConversion(lhs, rhs, mach);
+    case CIR_BINOP_MOD:
+        return CirType__arithmeticConversion(lhs, rhs, mach);
+    case CIR_BINOP_SHIFTLT:
+        cir_bug("TODO: CIR_BINOP_SHIFTLT");
+    case CIR_BINOP_SHIFTRT:
+        cir_bug("TODO: CIR_BINOP_SHIFTRT");
+    case CIR_BINOP_BAND:
+        cir_bug("TODO: CIR_BINOP_BAND");
+    case CIR_BINOP_BXOR:
+        cir_bug("TODO: CIR_BINOP_BXOR");
+    case CIR_BINOP_BOR:
+        cir_bug("TODO: CIR_BINOP_BOR");
+    default:
+        cir_bug("unhandled binop");
+    }
+}
+
+CIR_PRIVATE
+const CirType *
+CirType_ofCall(const CirType *targetType)
+{
+    const CirType *targetTypeUnrolled = CirType_unroll(targetType);
+    if (CirType_isFun(targetTypeUnrolled)) {
+        return CirType_getBaseType(targetTypeUnrolled);
+    } else if (CirType_isPtr(targetTypeUnrolled)) {
+        const CirType *bt = CirType_getBaseType(targetTypeUnrolled);
+        bt = CirType_unroll(bt);
+        if (!CirType_isFun(bt))
+            goto fail;
+        return CirType_getBaseType(bt);
+    } else {
+fail:
+        CirLog_begin(CIRLOG_FATAL);
+        CirLog_print("call: ");
+        CirType_log(targetType, NULL);
+        CirLog_print(" is not callable");
+        CirLog_end();
+        exit(1);
     }
 }

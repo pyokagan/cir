@@ -5,9 +5,6 @@
 #include <string.h>
 #include <stdarg.h>
 
-// Alignment boundary
-#define CIR_MEM_ALIGN 8
-
 // Maximum number of attributes
 #define CIR_MAX_ATTRS 31
 
@@ -31,7 +28,7 @@
 #define CIR_GCC 0
 #define CIR_MSVC 1
 
-// ikind (4 bits)
+// ikind
 #define CIR_ICHAR 1
 #define CIR_ISCHAR 2
 #define CIR_IUCHAR 3
@@ -45,10 +42,11 @@
 #define CIR_ILONGLONG 11
 #define CIR_IULONGLONG 12
 
-// fkind (2 bits)
+// fkind
 #define CIR_FFLOAT 13
 #define CIR_FDOUBLE 14
 #define CIR_FLONGDOUBLE 15
+#define CIR_F128 16
 
 // storage kind
 #define CIR_NOSTORAGE 0
@@ -83,10 +81,20 @@
 #define CIR_CONDOP_EQ 5
 #define CIR_CONDOP_NE 6
 
+// Builtins
+enum {
+    CIR_BUILTIN_BSWAP16 = 1,
+    CIR_BUILTIN_BSWAP32,
+    CIR_BUILTIN_BSWAP64,
+    CIR_NUM_BUILTINS
+};
+
 typedef struct CirMachine CirMachine;
 typedef uint32_t CirName; // Reference type
 typedef struct CirType CirType; // Value type
 typedef uint32_t CirCompId; // Reference type
+typedef uint32_t CirEnumId;
+typedef uint32_t CirEnumItemId;
 typedef uint32_t CirTypedefId; // Reference type
 typedef uint32_t CirVarId; // Reference type
 typedef uint32_t CirStmtId; // Reference type
@@ -94,6 +102,7 @@ typedef struct CirValue CirValue;
 typedef uint32_t CirCodeId;
 typedef struct CirAttr CirAttr;
 typedef uint32_t CirStorage;
+typedef uint32_t CirBuiltinId;
 
 typedef struct CirFunParam {
     CirName name;
@@ -125,6 +134,9 @@ void CIRAPI(cir_log)(const char *fmt, ...)
 uint64_t CIRAPI(CirPrime_ge)(uint64_t target);
 
 void CirBreak(void);
+
+// CirMem
+void *CIRAPI(CirMem_balloc)(size_t n, size_t align) __attribute__((malloc));
 
 // CirMachine
 const CirMachine *CIRAPI(CirMachine_getBuild)(void);
@@ -171,15 +183,18 @@ bool CIRAPI(CirType_isArray)(const CirType *);
 bool CIRAPI(CirType_isFun)(const CirType *);
 bool CIRAPI(CirType_isNamed)(const CirType *);
 bool CIRAPI(CirType_isComp)(const CirType *);
+bool CIRAPI(CirType_isEnum)(const CirType *);
 bool CIRAPI(CirType_isVaList)(const CirType *);
 const CirType *CIRAPI(CirType_getBaseType)(const CirType *);
 CirTypedefId CIRAPI(CirType_getTypedefId)(const CirType *);
 CirCompId CIRAPI(CirType_getCompId)(const CirType *);
+CirEnumId CIRAPI(CirType_getEnumId)(const CirType *);
 const CirType *CIRAPI(CirType_void)(void);
 const CirType *CIRAPI(CirType_int)(uint32_t ikind);
 const CirType *CIRAPI(CirType_float)(uint32_t fkind);
 const CirType *CIRAPI(CirType_typedef)(CirTypedefId);
 const CirType *CIRAPI(CirType_comp)(CirCompId);
+const CirType *CIRAPI(CirType_enum)(CirEnumId);
 const CirType *CIRAPI(CirType_ptr)(const CirType *);
 const CirType *CIRAPI(CirType_array)(const CirType *);
 const CirType *CIRAPI(CirType_arrayWithLen)(const CirType *, uint32_t len);
@@ -203,6 +218,12 @@ uint32_t CIRAPI(CirType_getArrayLen)(const CirType *);
 uint64_t CIRAPI(CirType_alignof)(const CirType *, const CirMachine *); // Returns alignment in bytes
 uint64_t CIRAPI(CirType_sizeof)(const CirType *, const CirMachine *);
 void CIRAPI(CirType_log)(const CirType *, const char *name);
+bool CIRAPI(CirType_equals)(const CirType *, const CirType *);
+
+// Builtin functions
+CirBuiltinId CIRAPI(CirBuiltin_ofName)(CirName);
+CirName CIRAPI(CirBuiltin_getName)(CirBuiltinId);
+const CirType *CIRAPI(CirBuiltin_getType)(CirBuiltinId);
 
 // Var
 CirVarId CIRAPI(CirVar_new)(CirCodeId ownerOrZero);
@@ -213,6 +234,7 @@ void CIRAPI(CirVar_setType)(CirVarId, const CirType *);
 CirVarId CIRAPI(CirVar_getFormal)(CirVarId, size_t i);
 void CIRAPI(CirVar_setFormal)(CirVarId, size_t, CirVarId);
 CirCodeId CIRAPI(CirVar_getCode)(CirVarId);
+void CIRAPI(CirVar_setCode)(CirVarId, CirCodeId);
 CirCodeId CIRAPI(CirVar_getOwner)(CirVarId);
 CirStorage CIRAPI(CirVar_getStorage)(CirVarId);
 void CIRAPI(CirVar_setStorage)(CirVarId, CirStorage);
@@ -250,19 +272,47 @@ uint64_t CIRAPI(CirComp_getSize)(CirCompId, const CirMachine *);
 uint64_t CIRAPI(CirComp_getFieldBitsOffset)(CirCompId, size_t, const CirMachine *);
 void CIRAPI(CirComp_log)(CirCompId cid);
 
+// Enum
+CirEnumId CIRAPI(CirEnum_new)(void);
+CirName CIRAPI(CirEnum_getName)(CirEnumId);
+void CIRAPI(CirEnum_setName)(CirEnumId, CirName);
+size_t CIRAPI(CirEnum_getNumItems)(CirEnumId);
+void CIRAPI(CirEnum_setNumItems)(CirEnumId, size_t);
+CirEnumItemId CIRAPI(CirEnum_getItem)(CirEnumId, size_t);
+void CIRAPI(CirEnum_setItem)(CirEnumId, size_t, CirEnumItemId);
+// The integer kind used to represent this enum.
+// Per ANSI-C, this should always be CIR_IINT, but gcc allows other integer kinds.
+uint32_t CIRAPI(CirEnum_getIkind)(CirEnumId);
+void CIRAPI(CirEnum_setIkind)(CirEnumId, uint32_t);
+bool CIRAPI(CirEnum_isDefined)(CirEnumId);
+void CIRAPI(CirEnum_setDefined)(CirEnumId, bool);
+
+// EnumItem
+CirEnumItemId CIRAPI(CirEnumItem_new)(CirName name);
+CirName CIRAPI(CirEnumItem_getName)(CirEnumItemId);
+int64_t CIRAPI(CirEnumItem_getI64)(CirEnumItemId);
+void CIRAPI(CirEnumItem_setI64)(CirEnumItemId, int64_t);
+
 // Value
+unsigned CIRAPI(CirValue_registerUser)(void);
 const CirValue *CIRAPI(CirValue_ofU64)(uint32_t ikind, uint64_t val);
 const CirValue *CIRAPI(CirValue_ofI64)(uint32_t ikind, int64_t val);
 const CirValue *CIRAPI(CirValue_ofVar)(CirVarId vid);
 const CirValue *CIRAPI(CirValue_ofMem)(CirVarId vid);
+const CirValue *CIRAPI(CirValue_ofUser)(unsigned id, void *);
 // NOTE: String is not copied!
 const CirValue *CIRAPI(CirValue_ofString)(const char *, size_t len);
 const CirValue *CIRAPI(CirValue_ofCString)(const char *);
+const CirValue *CIRAPI(CirValue_ofType)(const CirType *);
+const CirValue *CIRAPI(CirValue_ofBuiltin)(CirBuiltinId);
 bool CIRAPI(CirValue_isInt)(const CirValue *);
 bool CIRAPI(CirValue_isString)(const CirValue *);
 bool CIRAPI(CirValue_isVar)(const CirValue *);
 bool CIRAPI(CirValue_isMem)(const CirValue *);
 bool CIRAPI(CirValue_isLval)(const CirValue *); // Var or Mem
+unsigned CIRAPI(CirValue_isUser)(const CirValue *);
+bool CIRAPI(CirValue_isType)(const CirValue *);
+CirBuiltinId CIRAPI(CirValue_isBuiltin)(const CirValue *);
 uint64_t CIRAPI(CirValue_getU64)(const CirValue *);
 int64_t CIRAPI(CirValue_getI64)(const CirValue *);
 const char *CIRAPI(CirValue_getString)(const CirValue *);
@@ -271,14 +321,21 @@ CirName CIRAPI(CirValue_getField)(const CirValue *, size_t);
 const CirValue *CIRAPI(CirValue_withFields)(const CirValue *, const CirName *fields, size_t len);
 CirVarId CIRAPI(CirValue_getVar)(const CirValue *);
 const CirValue *CIRAPI(CirValue_withVar)(const CirValue *, CirVarId);
-uint64_t CIRAPI(CirValue_computeBitsOffset)(const CirValue *, const CirMachine *);
-const CirType *CIRAPI(CirValue_getType)(const CirValue *);
-const CirType *CIRAPI(CirValue_getCastType)(const CirValue *);
+void *CIRAPI(CirValue_getPtr)(const CirValue *);
+const CirType *CIRAPI(CirValue_getType)(const CirValue *); // Returns the (may be casted) type
+const CirType *CIRAPI(CirValue_getRawType)(const CirValue *); // Returns the raw underlying type. Note that ints always have a cast type.
+const CirType *CIRAPI(CirValue_getCastType)(const CirValue *); // Returns the cast type, if any
 const CirValue *CIRAPI(CirValue_withCastType)(const CirValue *, const CirType *);
+const CirType *CIRAPI(CirValue_getTypeValue)(const CirValue *);
 void CIRAPI(CirValue_log)(const CirValue *);
 
 // Stmts
+unsigned CIRAPI(CirStmt_registerUser)(void);
+CirStmtId CIRAPI(CirStmt_newOrphan)(void); // Create a new empty NOP stmt that is not owned by any code
 CirStmtId CIRAPI(CirStmt_newAfter)(CirStmtId sid); // Create a new empty NOP stmt after sid
+CirStmtId CIRAPI(CirStmt_newBefore)(CirStmtId); // Create a new empty NOP stmt after sid
+void CIRAPI(CirStmt_orphanize)(CirStmtId); // Detach stmt from whatever code it is attached to, and make it an orphan
+bool CIRAPI(CirStmt_isOrphan)(CirStmtId stmtId);
 void CIRAPI(CirStmt_toNop)(CirStmtId sid);
 void CIRAPI(CirStmt_toUnOp)(CirStmtId sid, const CirValue *dst, uint32_t unop, const CirValue *op1);
 void CIRAPI(CirStmt_toBinOp)(CirStmtId sid, const CirValue *dst, uint32_t binop, const CirValue *op1, const CirValue *op2);
@@ -286,8 +343,9 @@ void CIRAPI(CirStmt_toCall)(CirStmtId sid, const CirValue *dst, const CirValue *
 void CIRAPI(CirStmt_toReturn)(CirStmtId sid, const CirValue *value);
 void CIRAPI(CirStmt_toCmp)(CirStmtId sid, uint32_t condop, const CirValue *op1, const CirValue *op2, CirStmtId target);
 void CIRAPI(CirStmt_toGoto)(CirStmtId sid, CirStmtId jumpTarget);
-void CIRAPI(CirStmt_toBreak)(CirStmtId);
-void CIRAPI(CirStmt_toContinue)(CirStmtId);
+void CIRAPI(CirStmt_toLabel)(CirStmtId sid, CirName labelName);
+void CIRAPI(CirStmt_toGotoLabel)(CirStmtId sid, CirName labelName);
+void CIRAPI(CirStmt_toUser)(CirStmtId, unsigned uid, void *ptr);
 bool CIRAPI(CirStmt_isNop)(CirStmtId sid);
 bool CIRAPI(CirStmt_isUnOp)(CirStmtId sid);
 bool CIRAPI(CirStmt_isBinOp)(CirStmtId sid);
@@ -296,24 +354,35 @@ bool CIRAPI(CirStmt_isReturn)(CirStmtId sid);
 bool CIRAPI(CirStmt_isCmp)(CirStmtId sid);
 bool CIRAPI(CirStmt_isGoto)(CirStmtId sid);
 bool CIRAPI(CirStmt_isJump)(CirStmtId sid);
-bool CIRAPI(CirStmt_isBreak)(CirStmtId);
-bool CIRAPI(CirStmt_isContinue)(CirStmtId);
+bool CIRAPI(CirStmt_isLabel)(CirStmtId sid);
+bool CIRAPI(CirStmt_isGotoLabel)(CirStmtId sid);
+unsigned CIRAPI(CirStmt_isUser)(CirStmtId);
 uint32_t CIRAPI(CirStmt_getOp)(CirStmtId stmt_id);
 const CirValue *CIRAPI(CirStmt_getDst)(CirStmtId);
 const CirValue *CIRAPI(CirStmt_getOperand1)(CirStmtId);
 const CirValue *CIRAPI(CirStmt_getOperand2)(CirStmtId);
+size_t CIRAPI(CirStmt_getNumOperands)(CirStmtId);
+const CirValue *CIRAPI(CirStmt_getOperand)(CirStmtId, size_t i);
+void CIRAPI(CirStmt_setOperand)(CirStmtId, size_t i, const CirValue *);
 size_t CIRAPI(CirStmt_getNumArgs)(CirStmtId);
 const CirValue *CIRAPI(CirStmt_getArg)(CirStmtId, size_t);
 CirStmtId CIRAPI(CirStmt_getJumpTarget)(CirStmtId);
 void CIRAPI(CirStmt_setJumpTarget)(CirStmtId, CirStmtId);
+CirName CIRAPI(CirStmt_getLabelName)(CirStmtId);
+void CIRAPI(CirStmt_setLabelName)(CirStmtId, CirName);
+void *CIRAPI(CirStmt_getPtr)(CirStmtId);
+void CIRAPI(CirStmt_setPtr)(CirStmtId, void *);
 CirStmtId CIRAPI(CirStmt_getNext)(CirStmtId sid);
 CirStmtId CIRAPI(CirStmt_getPrev)(CirStmtId sid);
 void CIRAPI(CirStmt_log)(CirStmtId sid);
+void CIRAPI(CirStmt_typecheck)(CirStmtId, const CirMachine *);
 
 // CirCode
 CirCodeId CIRAPI(CirCode_ofExpr)(const CirValue *); // Create an empty expr block
 CirCodeId CIRAPI(CirCode_ofCond)(void); // Create an empty cond block
 CirStmtId CIRAPI(CirCode_appendNewStmt)(CirCodeId); // Append a new NOP stmt
+CirStmtId CIRAPI(CirCode_prependNewStmt)(CirCodeId); // Prepend a new NOP stmt
+void CIRAPI(CirCode_appendOrphanStmt)(CirCodeId codeId, CirStmtId stmtId);
 bool CIRAPI(CirCode_isExpr)(CirCodeId);
 bool CIRAPI(CirCode_isCond)(CirCodeId);
 void CIRAPI(CirCode_free)(CirCodeId);
@@ -330,6 +399,8 @@ void CIRAPI(CirCode_append)(CirCodeId a, CirCodeId b);
 void CIRAPI(CirCode_dump)(CirCodeId cid);
 size_t CIRAPI(CirCode_getNumVars)(CirCodeId cid);
 CirVarId CIRAPI(CirCode_getVar)(CirCodeId cid, size_t i);
+void CIRAPI(CirCode_typecheck)(CirCodeId, const CirMachine *);
+void CIRAPI(CirCode_resolveLabels)(CirCodeId);
 
 #undef CIRAPI
 

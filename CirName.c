@@ -1,4 +1,5 @@
 #include "cir_internal.h"
+#include <stdalign.h>
 
 #define TABLE_SIZE 104729U
 #define MAX_NAMES 806597U
@@ -48,7 +49,7 @@ CirName_of(const char *name)
 
     // Copy name
     size_t nameLen = strlen(name);
-    char *nameMem = cir__balloc(nameLen + 1);
+    char *nameMem = CirMem_balloc(nameLen + 1, alignof(char));
     memcpy(nameMem, name, nameLen + 1);
     uint32_t nameIdx = numNames++;
     names[nameIdx] = nameMem;

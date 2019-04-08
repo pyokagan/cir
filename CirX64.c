@@ -1046,6 +1046,7 @@ emitUnop(CirStmtId stmt_id)
     case CIR_UNOP_IDENTITY: {
         const CirType *dstType = CirValue_getType(dst);
         const CirType *operand1Type = CirValue_getType(operand1);
+        operand1Type = CirType_lvalConv(operand1Type);
         uint64_t dstType_size = CirType_sizeof(dstType, &CirMachine__build);
         uint64_t operand1Type_size = CirType_sizeof(operand1Type, &CirMachine__build);
         if (dstType_size <= 8 && operand1Type_size <= 8) {
@@ -1054,8 +1055,13 @@ emitUnop(CirStmtId stmt_id)
             emitStore(dst, REG_OPERAND1);
         } else {
             // Do a memcpy
-            if (dstType_size != operand1Type_size)
-                cir_fatal("simple assign: size mismatch");
+            if (dstType_size != operand1Type_size) {
+                CirLog_begin(CIRLOG_FATAL);
+                CirLog_print("simple assign: size mismatch: ");
+                CirStmt_log(stmt_id);
+                CirLog_end();
+                exit(1);
+            }
             emitLoadAddress(REG_RDI, dst); // dst pointer
             emitLoadAddress(REG_RSI, operand1); // src pointer
             emitMovImmU64(REG_RDX, dstType_size); // len
@@ -1251,10 +1257,8 @@ doCompile(CirVarId var_id)
             CirStmtId jumpTarget = CirStmt_getJumpTarget(stmt_id);
             assert(jumpTarget);
             emitJumpToStmt(jumpTarget);
-        } else if (CirStmt_isBreak(stmt_id)) {
-            cir_fatal("CirX64: encountered a break statement: this should not happen unless you used break outside a loop");
-        } else if (CirStmt_isContinue(stmt_id)) {
-            cir_fatal("CirX64: encountered a continue statement: this should not happen unless you used continue outside a loop");
+        } else if (CirStmt_isLabel(stmt_id)) {
+            // Ignore labels -- since we do not support goto-label stmts they are useless
         } else {
             cir_bug("CirX64: stmt kind not implemented");
         }
@@ -1429,9 +1433,9 @@ isCirCodeType(const CirType *type)
 }
 
 static CirCodeId
-intToCode(uint32_t ikind, uint64_t val)
+intToCode(uint32_t ikind, const CirType *actualType, uint64_t val)
 {
-    const CirValue *value = CirValue_ofU64(ikind, val);
+    const CirValue *value = CirValue_withCastType(CirValue_ofU64(ikind, val), actualType);
     CirCodeId code_id = CirCode_ofExpr(value);
     return code_id;
 }
@@ -1586,7 +1590,7 @@ is_va2:
     } else if (CirType_isVoid(unrolledReturnType)) {
         return CirCode_ofExpr(NULL);
     } else {
-        return intToCode(ikind, result);
+        return intToCode(ikind, returnType, result);
     }
 }
 

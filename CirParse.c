@@ -1,6 +1,7 @@
 #include "cir_internal.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <stdalign.h>
 
 static const CirMachine *CirParse__mach;
 
@@ -18,17 +19,20 @@ typedef struct CirParse__TypeSpecItem {
         CIRPARSE_TLONG,
         CIRPARSE_TFLOAT,
         CIRPARSE_TDOUBLE,
+        CIRPARSE_TFLOAT128,
         CIRPARSE_TSIGNED,
         CIRPARSE_TUNSIGNED,
         CIRPARSE_TNAMED,
         CIRPARSE_TAUTOTYPE,
         CIRPARSE_TCOMP,
+        CIRPARSE_TENUM,
         CIRPARSE_TBUILTIN_VA_LIST
     } type;
     union {
         CirName name;
         CirTypedefId tid;
         CirCompId cid;
+        CirEnumId enumId;
     } data;
 } CirParse__TypeSpecItem;
 typedef CirArray(CirParse__TypeSpecItem) CirParse__TypeSpecArray;
@@ -74,6 +78,7 @@ typedef CirArray(CirParse__DeclItem) CirParse__DeclArray;
 static bool decl_spec_list_FIRST(void);
 static void declaration_or_function_definition(CirCodeId);
 static void comp_field_declaration(CirCompId);
+static int64_t enum_item(CirEnumId, int64_t);
 static const CirType *type_name(int);
 static CirCodeId comma_expression(void);
 static CirCodeId expression(void);
@@ -114,12 +119,13 @@ makeGlobalVar(CirVarId vid)
 {
     CirVarId old_vid;
     CirTypedefId tid;
+    CirEnumItemId enumItemId;
     CirName name = CirVar_getName(vid);
     assert(name);
-    int result = CirEnv__findGlobalName(name, &old_vid, &tid);
+    int result = CirEnv__findGlobalName(name, &old_vid, &tid, &enumItemId);
     if (!result) {
         return vid;
-    } else if (result == 2) {
+    } else if (result == 2 || result == 3) {
         cir_fatal("declared as a different type of symbol: %s", CirName_cstr(name));
     } else {
         assert(result == 1);
@@ -156,7 +162,7 @@ string_literal(size_t *outSize)
     // Finally NUL-terminate
     CirBBuf_grow(&buf, 1);
     buf.items[buf.len++] = 0;
-    char *out = cir__balloc(buf.len);
+    char *out = CirMem_balloc(buf.len, alignof(*out));
     memcpy(out, buf.items, buf.len);
     if (outSize)
         *outSize = buf.len;
@@ -168,6 +174,20 @@ static const CirAttr *
 attr(void)
 {
     switch (cirtok.type) {
+    case CIRTOK_ALIGNOF: { // __alignof__(type)
+        CirLex__next();
+        if (cirtok.type != CIRTOK_LPAREN)
+            unexpected_token("attr_alignof", "`(`");
+        CirLex__next();
+        if (!decl_spec_list_FIRST())
+            unexpected_token("attr_alignof", "type_name");
+        const CirType *t = type_name(CIRTOK_RPAREN);
+        if (cirtok.type != CIRTOK_RPAREN)
+            unexpected_token("attr_alignof", "`)`");
+        CirLex__next();
+        uint64_t result = CirType_alignof(t, CirParse__mach);
+        return CirAttr_int(result);
+    }
     case CIRTOK_IDENT:
     case CIRTOK_TYPENAME: {
         CirName name = cirtok.data.name;
@@ -322,6 +342,52 @@ attribute_finish:
 }
 
 static CirCodeId
+comp_eval(void)
+{
+    assert(cirtok.type == CIRTOK_AT);
+    CirLex__next(); // consume AT
+    if (cirtok.type != CIRTOK_IDENT)
+        unexpected_token("comp_eval", "IDENT");
+    CirVarId vid;
+    CirTypedefId tid;
+    CirEnumItemId enumItemId;
+    if (CirEnv__findLocalName(cirtok.data.name, &vid, &tid, &enumItemId) != 1)
+        cir_fatal("comp_eval: unknown ident: %s", CirName_cstr(cirtok.data.name));
+    CirLex__next(); // consume IDENT
+    if (cirtok.type != CIRTOK_LPAREN)
+        unexpected_token("comp_eval", "`(`");
+    CirLex__next(); // consume LPAREN
+
+    // Collect function arguments.
+    CirArray(CirCodeId) args = CIRARRAY_INIT;
+
+    // Are we calling with any arguments?
+    if (cirtok.type == CIRTOK_RPAREN) {
+        CirLex__next();
+        goto build_function_call;
+    }
+
+    for (;;) {
+        CirCodeId argCode = expression();
+        assert(CirCode_isExpr(argCode));
+        CirArray_push(&args, &argCode);
+        if (cirtok.type == CIRTOK_COMMA) {
+            CirLex__next();
+        } else if (cirtok.type == CIRTOK_RPAREN) {
+            CirLex__next();
+            break;
+        } else {
+            unexpected_token("comp_eval", "`,`, `)`");
+        }
+    }
+
+build_function_call: ;
+    CirCodeId code_id = CirX64_call(vid, args.items, args.len);
+    CirArray_release(&args);
+    return code_id;
+}
+
+static CirCodeId
 primary_expression(void)
 {
     switch (cirtok.type) {
@@ -354,76 +420,38 @@ primary_expression(void)
     case CIRTOK_IDENT: {
         CirVarId vid;
         CirTypedefId tid;
+        CirEnumItemId enumItemId;
 
-        if (CirEnv__findLocalName(cirtok.data.name, &vid, &tid) == 1) {
+        switch (CirEnv__findLocalName(cirtok.data.name, &vid, &tid, &enumItemId)) {
+        case 1: {
             const CirValue *val = CirValue_ofVar(vid);
             CirLex__next(); // consume ident
             return CirCode_ofExpr(val);
-        } else {
+        }
+        case 3: {
+            int64_t value = CirEnumItem_getI64(enumItemId);
+            CirLex__next(); // consume ident
+            // The C spec says that enum constants always have type int
+            return CirCode_ofExpr(CirValue_ofI64(CIR_IINT, value));
+        }
+        default:
             cir_fatal("unknown ident: %s", CirName_cstr(cirtok.data.name));
         }
     }
-    case CIRTOK_AT: {
-        CirCodeId code_id;
-
-        // compile-time evaluation
-        CirLex__next();
-
-        if (cirtok.type != CIRTOK_IDENT)
-            unexpected_token("comp_eval", "IDENT");
-
-        CirVarId vid;
-        CirTypedefId tid;
-        if (CirEnv__findLocalName(cirtok.data.name, &vid, &tid) != 1)
-            cir_fatal("comp_eval: unknown ident: %s", CirName_cstr(cirtok.data.name));
-
-        const CirType *type = CirVar_getType(vid);
-        if (!CirType_isFun(type)) {
-            CirLog_begin(CIRLOG_FATAL);
-            CirLog_print("comp_eval: not a function type: ");
-            CirType_log(type, CirName_cstr(cirtok.data.name));
-        }
-
-        CirLex__next();
-
-        if (cirtok.type != CIRTOK_LPAREN)
-            unexpected_token("comp_eval", "`(`");
-        CirLex__next();
-
-        // Collect function arguments.
-        CirArray(CirCodeId) args = CIRARRAY_INIT;
-
-        // Are we calling with any arguments?
-        if (cirtok.type == CIRTOK_RPAREN) {
-            CirLex__next();
-            goto build_function_call;
-        }
-
-        for (;;) {
-            CirCodeId argCode = expression();
-            assert(CirCode_isExpr(argCode));
-            CirArray_push(&args, &argCode);
-            if (cirtok.type == CIRTOK_COMMA) {
-                CirLex__next();
-            } else if (cirtok.type == CIRTOK_RPAREN) {
-                CirLex__next();
-                break;
-            } else {
-                unexpected_token("comp_eval", "`,`, `)`");
-            }
-        }
-
-build_function_call:
-        code_id = CirX64_call(vid, args.items, args.len);
-        CirArray_release(&args);
-        return code_id;
+    case CIRTOK_BUILTIN: {
+        assert(cirtok.data.builtinId);
+        const CirValue *val = CirValue_ofBuiltin(cirtok.data.builtinId);
+        CirLex__next(); // consume BUILTIN
+        return CirCode_ofExpr(val);
     }
+    case CIRTOK_AT:
+        return comp_eval();
     case CIRTOK_LPAREN: {
         // comma expression or statement expression
         CirLex__next(); // consume LPAREN
         if (cirtok.type == CIRTOK_LBRACE) {
             // statement expression
-            CirEnv__pushScope();
+            CirEnv__pushLocalScope();
             CirCodeId code_id = block(false);
             CirEnv__popScope();
             if (cirtok.type != CIRTOK_RPAREN)
@@ -568,7 +596,7 @@ unary_expression(void)
                 CirCode_free(code_id);
             }
             if (cirtok.type != CIRTOK_RPAREN)
-                cir_fatal("sizeof: expected RPAREN");
+                unexpected_token("sizeof", "`)`");
             CirLex__next();
         } else {
             // Is unary_expression
@@ -579,6 +607,34 @@ unary_expression(void)
         uint64_t size = CirType_sizeof(t, CirParse__mach);
         uint32_t ikind = CirIkind_fromSize(CirParse__mach->sizeofSizeT, true, CirParse__mach);
         return CirCode_ofExpr(CirValue_ofU64(ikind, size));
+    }
+    case CIRTOK_ALIGNOF: {
+        CirLex__next();
+        if (cirtok.type != CIRTOK_LPAREN)
+            unexpected_token("alignof", "`(`");
+        CirLex__next();
+        if (!decl_spec_list_FIRST())
+            unexpected_token("alignof", "type_name");
+        const CirType *t = type_name(CIRTOK_RPAREN);
+        if (cirtok.type != CIRTOK_RPAREN)
+            unexpected_token("alignof", "`)`");
+        CirLex__next();
+        uint64_t result = CirType_alignof(t, CirParse__mach);
+        uint32_t ikind = CirIkind_fromSize(CirParse__mach->sizeofSizeT, true, CirParse__mach);
+        return CirCode_ofExpr(CirValue_ofU64(ikind, result));
+    }
+    case CIRTOK_TYPEVAL: {
+        CirLex__next();
+        if (cirtok.type != CIRTOK_LPAREN)
+            unexpected_token("typeval", "`(`");
+        CirLex__next();
+        if (!decl_spec_list_FIRST())
+            unexpected_token("typeval", "type_name");
+        const CirType *t = type_name(CIRTOK_RPAREN);
+        if (cirtok.type != CIRTOK_RPAREN)
+            unexpected_token("typeval", "`)`");
+        CirLex__next();
+        return CirCode_ofExpr(CirValue_ofType(t));
     }
     case CIRTOK_EXCLAM: { // NOT
         CirLex__next();
@@ -622,7 +678,7 @@ cast_expression(void)
             return code_id;
         } else if (cirtok.type == CIRTOK_LBRACE) {
             // statement expression
-            CirEnv__pushScope();
+            CirEnv__pushLocalScope();
             CirCodeId code_id = block(false);
             CirEnv__popScope();
             if (cirtok.type != CIRTOK_RPAREN)
@@ -695,7 +751,23 @@ loop:
 static CirCodeId
 shift_expression(void)
 {
-    return additive_expression();
+    CirCodeId lhs_id, rhs_id;
+    lhs_id = additive_expression();
+loop:
+    switch (cirtok.type) {
+    case CIRTOK_INF_INF: // <<
+        CirLex__next();
+        rhs_id = additive_expression();
+        lhs_id = CirBuild__lshift(lhs_id, rhs_id, CirParse__mach);
+        goto loop;
+    case CIRTOK_SUP_SUP: // >>
+        CirLex__next();
+        rhs_id = additive_expression();
+        lhs_id = CirBuild__rshift(lhs_id, rhs_id, CirParse__mach);
+        goto loop;
+    default:
+        return lhs_id;
+    }
 }
 
 static CirCodeId
@@ -805,33 +877,13 @@ conditional_expression(void)
     if (cirtok.type == CIRTOK_QUEST) {
         // Is ternary operator
         CirLex__next();
-        CirCodeId thenCode = comma_expression();
-        thenCode = CirCode_toExpr(thenCode, false);
-        const CirValue *thenValue = CirCode_getValue(thenCode);
-        if (!thenValue)
-            cir_fatal("ternary: thencode has no value");
-        const CirType *thenType = CirCode_getType(thenCode);
-        thenType = CirType__arrayToPtr(thenType);
+        CirCodeId condCodeId = lhs_id;
+        CirCodeId thenCodeId = comma_expression();
         if (cirtok.type != CIRTOK_COLON)
             unexpected_token("ternary", "`:`");
         CirLex__next();
-        CirCodeId elseCode = conditional_expression();
-        elseCode = CirCode_toExpr(elseCode, false);
-        const CirValue *elseValue = CirCode_getValue(elseCode);
-        if (!elseValue)
-            cir_fatal("ternary: else branch has no value");
-        CirVarId tmpvar_id = CirVar_new(lhs_id);
-        // TODO: Check to see if then and else have the same types
-        CirVar_setType(tmpvar_id, thenType);
-        const CirValue *tmpvar_value = CirValue_ofVar(tmpvar_id);
-        CirStmtId stmt_id;
-        stmt_id = CirCode_appendNewStmt(thenCode);
-        CirStmt_toUnOp(stmt_id, tmpvar_value, CIR_UNOP_IDENTITY, thenValue);
-        stmt_id = CirCode_appendNewStmt(elseCode);
-        CirStmt_toUnOp(stmt_id, tmpvar_value, CIR_UNOP_IDENTITY, elseValue);
-        lhs_id = CirBuild__if(lhs_id, thenCode, elseCode);
-        assert(CirCode_isExpr(lhs_id));
-        CirCode_setValue(lhs_id, tmpvar_value);
+        CirCodeId elseCodeId = conditional_expression();
+        lhs_id = CirBuild__ternary(condCodeId, thenCodeId, elseCodeId, CirParse__mach);
     }
     return lhs_id;
 }
@@ -885,7 +937,7 @@ statement(CirCodeId blockCode, bool dropValue)
         return blockCode;
     case CIRTOK_LBRACE: {
         // Nested block
-        CirEnv__pushScope();
+        CirEnv__pushLocalScope();
         CirCodeId nestedBlock = block(dropValue);
         assert(!nestedBlock || CirCode_isExpr(nestedBlock));
         CirEnv__popScope();
@@ -961,9 +1013,30 @@ statement(CirCodeId blockCode, bool dropValue)
             blockCode = condCode;
         else
             CirCode_append(blockCode, condCode);
+
+        // Determine continueStmt
+        CirStmtId continueStmtId = firstStmt;
+        if (!continueStmtId)
+            continueStmtId = CirCode_appendNewStmt(blockCode);
+        assert(continueStmtId);
+
+        // We will never know what comes "after" the loop, so we will always need to make our own breakStmt
+        // Note that the stmt must come AFTER the loop, but we haven't appended the loop body yet, so make an orphan stmt first.
+        CirStmtId breakStmtId = CirStmt_newOrphan();
+
+        // Create the loop context
+        CirLoopEnv_pushLoop(continueStmtId, breakStmtId);
+
+        // Next comes the loop body
         CirCodeId thenCode = statement(0, true);
-        blockCode = CirBuild__for(blockCode, firstStmt, thenCode, 0);
+
+        // Pop loop context
+        CirLoopEnv_pop();
+
+        // Construct while loop
+        blockCode = CirBuild__for(blockCode, firstStmt, thenCode, 0, breakStmtId);
         assert(CirCode_isExpr(blockCode));
+
         return blockCode;
     }
     case CIRTOK_FOR: {
@@ -972,7 +1045,7 @@ statement(CirCodeId blockCode, bool dropValue)
         if (cirtok.type != CIRTOK_LPAREN)
             unexpected_token("for", "`(`");
         CirLex__next(); // consume LPAREN
-        CirEnv__pushScope(); // push scope
+        CirEnv__pushLocalScope(); // push scope
         // clause1Code is blockCode
         if (cirtok.type == CIRTOK_SEMICOLON) {
             CirLex__next(); // consume SEMICOLON
@@ -1016,6 +1089,7 @@ statement(CirCodeId blockCode, bool dropValue)
             else
                 CirCode_append(blockCode, clause2Code);
         }
+        assert(blockCode);
         CirCodeId clause3Code;
         if (cirtok.type == CIRTOK_RPAREN) {
             CirLex__next(); // consume RPAREN
@@ -1027,13 +1101,35 @@ statement(CirCodeId blockCode, bool dropValue)
                 unexpected_token("for", "`)`");
             CirLex__next();
         }
+
+        // Determine continueStmt
+        CirStmtId continueStmtId = clause3Code ? CirCode_getFirstStmt(clause3Code) : 0;
+        if (!continueStmtId)
+            continueStmtId = firstStmt; // Note that firstStmt may be 0
+        if (!continueStmtId)
+            continueStmtId = CirCode_appendNewStmt(blockCode);
+        assert(continueStmtId);
+
+        // We will never know what comes "after" the loop, so we will always need to make our own breakStmt
+        // Note that the stmt must come AFTER the loop, but we haven't appended the loop body yet, so make an orphan stmt first.
+        CirStmtId breakStmtId = CirStmt_newOrphan();
+
+        // Create the loop context
+        CirLoopEnv_pushLoop(continueStmtId, breakStmtId);
+
         // Next comes the loop body
         CirCodeId bodyCode = statement(0, true);
+
+        // Pop loop context
+        CirLoopEnv_pop();
+
         // Pop scope
         CirEnv__popScope();
+
         // Construct for loop
-        blockCode = CirBuild__for(blockCode, firstStmt, bodyCode, clause3Code);
+        blockCode = CirBuild__for(blockCode, firstStmt, bodyCode, clause3Code, breakStmtId);
         assert(CirCode_isExpr(blockCode));
+
         return blockCode;
     }
     case CIRTOK_BREAK: {
@@ -1042,10 +1138,13 @@ statement(CirCodeId blockCode, bool dropValue)
         if (cirtok.type != CIRTOK_SEMICOLON)
             unexpected_token("break", "`;`");
         CirLex__next();
+        CirStmtId breakStmtId = CirLoopEnv_getBreakStmtId();
+        if (!breakStmtId)
+            cir_fatal("break outside of loop or switch");
         if (!blockCode)
             blockCode = CirCode_ofExpr(NULL);
         CirStmtId stmt_id = CirCode_appendNewStmt(blockCode);
-        CirStmt_toBreak(stmt_id);
+        CirStmt_toGoto(stmt_id, breakStmtId);
         return blockCode;
     }
     case CIRTOK_CONTINUE: {
@@ -1054,11 +1153,48 @@ statement(CirCodeId blockCode, bool dropValue)
         if (cirtok.type != CIRTOK_SEMICOLON)
             unexpected_token("continue", "`;`");
         CirLex__next();
+        CirStmtId continueStmtId = CirLoopEnv_getContinueStmtId();
+        if (!continueStmtId)
+            cir_fatal("continue outside of loop");
         if (!blockCode)
             blockCode = CirCode_ofExpr(NULL);
         CirStmtId stmt_id = CirCode_appendNewStmt(blockCode);
-        CirStmt_toContinue(stmt_id);
+        CirStmt_toGoto(stmt_id, continueStmtId);
         return blockCode;
+    }
+    case CIRTOK_GOTO: {
+        // goto label statement
+        CirLex__next();
+        if (cirtok.type != CIRTOK_IDENT)
+            unexpected_token("goto", "IDENT");
+        if (!blockCode)
+            blockCode = CirCode_ofExpr(NULL);
+        CirStmtId stmtId = CirCode_appendNewStmt(blockCode);
+        CirStmt_toGotoLabel(stmtId, cirtok.data.name);
+        CirLex__next(); // consume IDENT
+        if (cirtok.type != CIRTOK_SEMICOLON)
+            unexpected_token("goto", "`;`");
+        return blockCode;
+    }
+    case CIRTOK_IDENT: {
+        // might be a label
+        CirToken identToken = cirtok;
+        CirName identName = cirtok.data.name;
+        CirLex__next();
+        if (cirtok.type == CIRTOK_COLON) {
+            // Is label
+            CirLex__next(); // consume COLON
+            if (!blockCode)
+                blockCode = CirCode_ofExpr(NULL);
+            CirStmtId stmtId = CirCode_appendNewStmt(blockCode);
+            CirStmt_toLabel(stmtId, identName);
+            return blockCode;
+        } else {
+            // Is not label -- Restore token
+            CirLex__push(&cirtok);
+            cirtok = identToken;
+        }
+        // Fallthrough
     }
     default: {
         // comma_expression
@@ -1128,6 +1264,8 @@ decl_spec_list_FIRST(void)
         cirtok.type == CIRTOK_AUTO_TYPE ||
         cirtok.type == CIRTOK_STRUCT ||
         cirtok.type == CIRTOK_UNION ||
+        cirtok.type == CIRTOK_ENUM ||
+        cirtok.type == CIRTOK_FLOAT128 ||
         // attribute_nocv
         attribute_list_FIRST(false, false);
 }
@@ -1168,8 +1306,9 @@ static CirCompId
 declareComp(CirName name, bool isStruct)
 {
     CirCompId cid;
-    int result = name ? CirEnv__findLocalTag(name, &cid) : 0;
-    if (CirEnv__findLocalTag(name, &cid) == 1) {
+    CirEnumId enumId;
+    int result = name ? CirEnv__findLocalTag(name, &cid, &enumId) : 0;
+    if (result == 1) {
         bool res = CirComp_isStruct(cid);
         if (res == isStruct) {
             // All OK
@@ -1187,6 +1326,27 @@ declareComp(CirName name, bool isStruct)
         if (name)
             CirEnv__setLocalTagAsComp(cid);
         return cid;
+    } else {
+        cir_fatal("declared as a different tag: %s", CirName_cstr(name));
+    }
+}
+
+static CirEnumId
+declareEnum(CirName name)
+{
+    CirCompId compId;
+    CirEnumId enumId;
+    int result = name ? CirEnv__findLocalTag(name, &compId, &enumId) : 0;
+    if (result == 2) {
+        // A redeclaration, but that's OK.
+        return enumId;
+    } else if (!result) {
+        // Not declared as anything, make a forward declaration
+        enumId = CirEnum_new();
+        CirEnum_setName(enumId, name);
+        if (name)
+            CirEnv__setLocalTagAsEnum(enumId);
+        return enumId;
     } else {
         cir_fatal("declared as a different tag: %s", CirName_cstr(name));
     }
@@ -1311,6 +1471,11 @@ loop:
         typeSpec.type = CIRPARSE_TDOUBLE;
         CirArray_push(&typeSpecs, &typeSpec);
         goto loop;
+    case CIRTOK_FLOAT128:
+        CirLex__next();
+        typeSpec.type = CIRPARSE_TFLOAT128;
+        CirArray_push(&typeSpecs, &typeSpec);
+        goto loop;
     case CIRTOK_SIGNED:
         CirLex__next();
         typeSpec.type = CIRPARSE_TSIGNED;
@@ -1331,7 +1496,8 @@ loop:
             goto finish; // We have already seen a type name, so this is the declarator
         CirTypedefId tid;
         CirVarId vid;
-        if (CirEnv__findLocalName(cirtok.data.name, &vid, &tid) != 2)
+        CirEnumItemId enumItemId;
+        if (CirEnv__findLocalName(cirtok.data.name, &vid, &tid, &enumItemId) != 2)
             cir_bug("env not in sync with lexer!");
         CirLex__next();
         typeSpec.type = CIRPARSE_TNAMED;
@@ -1379,6 +1545,51 @@ loop:
             goto loop;
         } else {
             cir_fatal("struct/union declaration without name");
+        }
+    }
+    case CIRTOK_ENUM: {
+        CirLex__next();
+        CirName name = 0;
+        if (cirtok.type == CIRTOK_IDENT || cirtok.type == CIRTOK_TYPENAME) {
+            name = cirtok.data.name;
+            CirLex__next();
+        }
+
+        if (cirtok.type == CIRTOK_LBRACE) {
+            // enum definition without name
+            CirLex__next(); // consume LBRACE
+
+            CirEnumId enumId = declareEnum(name);
+            if (CirEnum_isDefined(enumId))
+                cir_fatal("enum has already been defined: %s", CirName_cstr(name));
+            CirEnum_setDefined(enumId, true);
+            int64_t prevValue = -1;
+            while (cirtok.type != CIRTOK_RBRACE) {
+                // TODO: Based on the minimum and maximum values of enum items,
+                // choose the correct ikind.
+                prevValue = enum_item(enumId, prevValue);
+                if (cirtok.type == CIRTOK_COMMA) {
+                    CirLex__next(); // consume COMMA, also takes care of trailing comma
+                } else if (cirtok.type == CIRTOK_RBRACE) {
+                    // Do nothing
+                } else {
+                    unexpected_token("enum_body", "declaration");
+                }
+            }
+            assert(cirtok.type == CIRTOK_RBRACE);
+            CirLex__next(); // consume RBRACE
+            typeSpec.type = CIRPARSE_TENUM;
+            typeSpec.data.enumId = enumId;
+            CirArray_push(&typeSpecs, &typeSpec);
+            goto loop;
+        } else if (name) {
+            // enum declaration with name
+            typeSpec.type = CIRPARSE_TENUM;
+            typeSpec.data.enumId = declareEnum(name);
+            CirArray_push(&typeSpecs, &typeSpec);
+            goto loop;
+        } else {
+            cir_fatal("enum declaration without name");
         }
     }
     default: // unknown token
@@ -1443,10 +1654,14 @@ finish:
         pspec->baseType = CirType_float(CIR_FDOUBLE);
     } else if (C2(CIRPARSE_TLONG, CIRPARSE_TDOUBLE)) {
         pspec->baseType = CirType_float(CIR_FLONGDOUBLE);
+    } else if (C1(CIRPARSE_TFLOAT128)) {
+        pspec->baseType = CirType_float(CIR_F128);
     } else if (C1(CIRPARSE_TNAMED)) {
         pspec->baseType = CirType_typedef(typeSpecs.items[0].data.tid);
     } else if (C1(CIRPARSE_TCOMP)) {
         pspec->baseType = CirType_comp(typeSpecs.items[0].data.cid);
+    } else if (C1(CIRPARSE_TENUM)) {
+        pspec->baseType = CirType_enum(typeSpecs.items[0].data.enumId);
     } else if (C1(CIRPARSE_TAUTOTYPE)) {
         pspec->baseType = NULL;
     } else if (C1(CIRPARSE_TBUILTIN_VA_LIST)) {
@@ -1474,7 +1689,7 @@ parameter_list(CirFunParamArray *outArr)
         cir_fatal("parameter_list: expected `(`");
     CirLex__next();
 
-    CirEnv__pushScope();
+    CirEnv__pushLocalScope();
 
     if (cirtok.type == CIRTOK_RPAREN)
         goto finish;
@@ -1675,6 +1890,8 @@ declarator(CirName *outName, CirParse__DeclArray *outArr, CirAttrArray *outAttrs
     CirArray_release(&pointers);
 }
 
+// TODO: Need to return the "name attributes", attributes which are tied to the VAR rather than the TYPE
+// e.g. section, constructor, weak, used, __asm__, noreturn
 static const CirType *
 doType(bool for_typedef, const CirType *bt, const CirParse__DeclArray *declArr)
 {
@@ -1845,7 +2062,13 @@ type_name(int expectedFollow)
     CirParse__DeclArray declArr = CIRARRAY_INIT;
     CirAttrArray declAttrs = CIRARRAY_INIT;
     declarator(NULL, &declArr, &declAttrs, DECLARATOR_ABSTRACT);
-    // TODO: do something with declAttrs
+    if (declAttrs.len) {
+        CirParse__DeclItem item = {};
+        item.type = CIRPARSE_DTPAREN;
+        for (size_t i = 0; i < declAttrs.len; i++)
+            CirArray_push(&item.rattrs, &declAttrs.items[i]);
+        CirArray_push(&declArr, &item);
+    }
 
     const CirType *t = doType(false, pspec.baseType, &declArr);
     CirParse__DeclArray_release(&declArr);
@@ -1867,7 +2090,8 @@ declareOneTypedef(const CirType *bt)
     {
         CirVarId vid;
         CirTypedefId tid;
-        if (CirEnv__findCurrentScopeName(declName, &vid, &tid) != 0)
+        CirEnumItemId enumItemId;
+        if (CirEnv__findCurrentScopeName(declName, &vid, &tid, &enumItemId) != 0)
             cir_fatal("re-declaration of %s", CirName_cstr(declName));
     }
 
@@ -1891,7 +2115,8 @@ declareOneVar(const CirParse__ProcessedSpec *pspec, CirCodeId ownerCode)
     if (!CirEnv__isGlobal()) {
         CirVarId vid;
         CirTypedefId tid;
-        if (CirEnv__findCurrentScopeName(declName, &vid, &tid) != 0)
+        CirEnumItemId enumItemId;
+        if (CirEnv__findCurrentScopeName(declName, &vid, &tid, &enumItemId) != 0)
             cir_fatal("re-declaration of %s in local scope", CirName_cstr(declName));
     }
 
@@ -1987,6 +2212,59 @@ comp_field_declaration(CirCompId cid)
     CirParse__ProcessedSpec_release(&pspec);
 }
 
+static int64_t
+enum_item(CirEnumId enumId, int64_t prevValue)
+{
+    if (cirtok.type != CIRTOK_IDENT)
+        unexpected_token("enumerator", "IDENT");
+    CirName name = cirtok.data.name;
+    CirLex__next(); // consume IDENT
+
+    int64_t newValue;
+    if (cirtok.type != CIRTOK_EQ) {
+        // No value provided, use one plus the prevValue
+        // TODO: Check for overflow
+        newValue = prevValue + 1;
+    } else {
+        CirLex__next(); // consume EQ
+        // NOTE: not comma_expression, because a comma signifies the next enumerator
+        CirCodeId codeId = expression();
+        if (CirCode_getFirstStmt(codeId))
+            cir_fatal("enumerator: expression has side effects");
+        const CirValue *value = CirCode_getValue(codeId);
+        if (!value)
+            cir_fatal("enumerator: expression has no value");
+        const CirType *valueType = CirValue_getType(value);
+        if (!valueType)
+            cir_fatal("enumerator: expression has unknown type");
+        if (!CirType_isInt(valueType))
+            cir_fatal("enumerator: expression does not have integer type");
+        if (!CirValue_isInt(value))
+            cir_fatal("enumerator: expression is not an integer constant");
+        newValue = CirValue_getI64(value);
+    }
+
+    // Check for re-definition
+    {
+        CirVarId varId;
+        CirTypedefId typedefId;
+        CirEnumItemId enumItemId;
+        if (CirEnv__findCurrentScopeName(name, &varId, &typedefId, &enumItemId) != 0)
+            cir_fatal("re-declaration of %s", CirName_cstr(name));
+    }
+
+    CirEnumItemId enumItemId = CirEnumItem_new(name);
+    CirEnumItem_setI64(enumItemId, newValue);
+
+    CirEnv__setLocalNameAsEnumItem(enumItemId);
+
+    size_t numItems = CirEnum_getNumItems(enumId);
+    CirEnum_setNumItems(enumId, numItems + 1);
+    CirEnum_setItem(enumId, numItems, enumItemId);
+
+    return newValue;
+}
+
 static void
 declaration_or_function_definition(CirCodeId ownerCode)
 {
@@ -2048,10 +2326,10 @@ declaration_or_function_definition(CirCodeId ownerCode)
         if (!CirType_isFun(t))
             cir_fatal("function definition can only be used with a function type");
 
-        CirEnv__pushScope();
+        CirEnv__pushLocalScope();
 
         CirCodeId fun_code = CirCode_ofExpr(NULL);
-        CirVar__setCode(vid, fun_code);
+        CirVar_setCode(vid, fun_code);
 
         // Create sformals for args and enter them
         size_t numParams = CirType_getNumParams(t);
@@ -2071,6 +2349,7 @@ declaration_or_function_definition(CirCodeId ownerCode)
         CirCode_append(fun_code, block_code);
         CirEnv__popScope();
         assert(CirCode_isExpr(fun_code));
+        CirCode_resolveLabels(fun_code);
         #if 0
         CirLog_begin(CIRLOG_DEBUG);
         CirCode_dump(fun_code);
@@ -2137,6 +2416,15 @@ toplevel(void)
 {
     if (decl_spec_list_FIRST()) {
         declaration_or_function_definition(0);
+    } else if (cirtok.type == CIRTOK_AT) {
+        // compile-time evaluation
+        CirCodeId codeId = comp_eval();
+        if (CirCode_getFirstStmt(codeId))
+            cir_fatal("comp_eval returned non-empty code at toplevel");
+        CirCode_free(codeId);
+        if (cirtok.type != CIRTOK_SEMICOLON)
+            unexpected_token("comp_eval", "`;`");
+        CirLex__next(); // consume SEMICOLON
     } else {
         unexpected_token("toplevel", "decl_spec_list_FIRST");
     }
@@ -2148,7 +2436,7 @@ cir__parse(const CirMachine *mach)
     CirParse__mach = mach;
 
     // Initialize global scope
-    CirEnv__pushScope();
+    CirEnv__pushGlobalScope();
 
     CirLex__next();
     while (cirtok.type != CIRTOK_EOF)

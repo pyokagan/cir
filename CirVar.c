@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 
-#define MAX_VARS 1024
+#define MAX_VARS (1024 * 1024)
 
 // data1:
 // bits 31 to 29: storage
@@ -100,7 +100,7 @@ CirVar_getCode(CirVarId var_id)
 }
 
 void
-CirVar__setCode(CirVarId var_id, CirCodeId code_id)
+CirVar_setCode(CirVarId var_id, CirCodeId code_id)
 {
     assert(var_id != 0);
     assert(vars[var_id].type != NULL);
@@ -210,7 +210,12 @@ CirVar_printDecl(CirFmt printer, CirVarId var_id, bool forRender)
     }
     const CirType *type = CirVar_getType(var_id);
     CirCodeId code_id = CirVar_getCode(var_id);
-    CirType_print(printer, type, namebuf, code_id, forRender);
+    if (type) {
+        CirType_print(printer, type, namebuf, code_id, forRender);
+    } else {
+        CirFmt_printString(printer, "__auto_type ");
+        CirFmt_printString(printer, namebuf);
+    }
 }
 
 void

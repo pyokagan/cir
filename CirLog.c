@@ -109,6 +109,8 @@ CirLog_printqb(const char *s, size_t len)
     for (size_t i = 0; i < len; i++) {
         uint8_t c = s[i];
         fputs(CirQuote__table[c], stderr);
+        if (c >= 127)
+            fputs("\"\"", stderr);
     }
     fputs("\"", stderr);
 }

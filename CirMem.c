@@ -2,17 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdalign.h>
+#include <assert.h>
 
 #define ALLOC_SIZE (1024 * 1024 * 1)
 
 static uint8_t *currMem;
 static size_t bytesAllocated;
-
-static size_t
-toAlign(size_t n, size_t roundto)
-{
-    return (n + (roundto - 1U)) & (~(roundto - 1U));
-}
 
 void *
 cir__xalloc(size_t n)
@@ -20,6 +15,15 @@ cir__xalloc(size_t n)
     void *ptr = malloc(n);
     if (!ptr)
         cir_fatal("out of memory when trying to alloc %lu bytes", (unsigned long)n);
+    return ptr;
+}
+
+void *
+cir__zalloc(size_t n)
+{
+    void *ptr = calloc(1, n);
+    if (!ptr)
+        cir_fatal("out of memory when trying to zalloc %lu bytes", (unsigned long)n);
     return ptr;
 }
 
@@ -39,9 +43,11 @@ cir__xfree(void *ptr)
 }
 
 void *
-cir__balloc(size_t n)
+CirMem_balloc(size_t n, size_t align)
 {
-    n = toAlign(n, CIR_MEM_ALIGN);
+    assert(align);
+    if (n % align)
+        n += align - n % align;
     if (!currMem || bytesAllocated + n > ALLOC_SIZE) {
         // Allocate another pool
         currMem = cir__xalloc(ALLOC_SIZE);

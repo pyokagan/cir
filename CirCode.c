@@ -139,6 +139,43 @@ CirCode_appendNewStmt(CirCodeId code_id)
     }
 }
 
+CirStmtId
+CirCode_prependNewStmt(CirCodeId codeId)
+{
+    assert(codeId);
+    assert(!CirCode_isFreed(codeId));
+    CirStmtId firstStmtId = CirCode_getFirstStmt(codeId);
+    if (firstStmtId) {
+        return CirStmt_newBefore(firstStmtId);
+    } else {
+        firstStmtId = CirStmt__new(codeId);
+        CirCode__setFirstStmt(codeId, firstStmtId);
+        CirCode__setLastStmt(codeId, firstStmtId);
+        return firstStmtId;
+    }
+}
+
+void
+CirCode_appendOrphanStmt(CirCodeId codeId, CirStmtId stmtId)
+{
+    assert(codeId);
+    assert(!CirCode_isFreed(codeId));
+    assert(stmtId);
+    assert(CirStmt_isOrphan(stmtId));
+    CirStmtId lastStmtId = CirCode_getLastStmt(codeId);
+    CirStmt__setNextCode(stmtId, codeId);
+    CirStmt__setPrevCode(stmtId, codeId);
+    if (lastStmtId) {
+        CirStmt__setPrevStmt(stmtId, lastStmtId);
+        CirStmt__setNextStmt(lastStmtId, stmtId);
+        CirCode__setLastStmt(codeId, stmtId);
+    } else {
+        CirCode__setFirstStmt(codeId, stmtId);
+        CirCode__setLastStmt(codeId, stmtId);
+    }
+    assert(!CirStmt_isOrphan(stmtId));
+}
+
 bool
 CirCode_isExpr(CirCodeId code_id)
 {
@@ -517,6 +554,46 @@ truncToIkindU(uint32_t ikind, uint64_t val, const CirMachine *mach)
         return lhs; \
     }
 
+// Performs integral promotions on lhs and rhs, but chooses type of lhs
+#define SHIFT_TEMPLATE(name, runtime_op, comptime_expr) \
+    lhs = CirCode_toExpr(lhs, false); \
+    rhs = CirCode_toExpr(rhs, false); \
+    const CirValue *lhs_value = CirCode_getValue(lhs); \
+    const CirValue *rhs_value = CirCode_getValue(rhs); \
+    if (!lhs_value) \
+        cir_fatal(name ": left operand is void"); \
+    if (!rhs_value) \
+        cir_fatal(name ": right operand is void"); \
+    const CirType *lhs_type = CirValue_getType(lhs_value); \
+    if (lhs_type) \
+        lhs_type = CirType__integralPromotion(lhs_type, mach); \
+    const CirType *rhs_type = CirValue_getType(rhs_value); \
+    if (!lhs_type || !rhs_type || CirValue_isLval(lhs_value) || CirValue_isLval(rhs_value)) { \
+        CirVarId dst_id = CirVar_new(lhs); \
+        const CirValue *dst_value = CirValue_ofVar(dst_id); \
+        CirVar_setType(dst_id, lhs_type); \
+        CirStmtId stmt_id = CirCode_appendNewStmt(lhs); \
+        CirStmt_toBinOp(stmt_id, dst_value, runtime_op, lhs_value, rhs_value); \
+        CirCode_setValue(lhs, dst_value); \
+        return lhs; \
+    } else { \
+        uint32_t ikind = CirType_isInt(lhs_type); \
+        const CirValue *dst_value; \
+        if (CirIkind_isSigned(ikind, mach)) { \
+            int64_t a = CirValue_getI64(lhs_value); \
+            int64_t b = CirValue_getI64(rhs_value); \
+            int64_t c = comptime_expr; \
+            dst_value = CirValue_ofI64(ikind, truncToIkindS(ikind, c, mach)); \
+        } else { \
+            uint64_t a = CirValue_getU64(lhs_value); \
+            uint64_t b = CirValue_getU64(rhs_value); \
+            uint64_t c = comptime_expr; \
+            dst_value = CirValue_ofU64(ikind, truncToIkindU(ikind, c, mach)); \
+        } \
+        CirCode_setValue(lhs, dst_value); \
+        return lhs; \
+    }
+
 #define RELOP_TEMPLATE(name, runtime_op, comptime_expr) \
     lhs = CirCode_toExpr(lhs, false); \
     rhs = CirCode_toExpr(rhs, false); \
@@ -528,11 +605,12 @@ truncToIkindU(uint32_t ikind, uint64_t val, const CirMachine *mach)
         cir_fatal(name ": right operand is void"); \
     const CirType *lhs_type = CirValue_getType(lhs_value); \
     const CirType *rhs_type = CirValue_getType(rhs_value); \
-    assert(lhs_type); \
-    assert(rhs_type); \
+    if (!lhs_type || !rhs_type) \
+        goto fallback; \
     CirCode_append(lhs, rhs); \
     const CirType *dst_type = CirType__arithmeticConversion(lhs_type, rhs_type, mach); \
     if (CirValue_isLval(lhs_value) || CirValue_isLval(rhs_value)) { \
+fallback: \
         CirCode__toEmptyCond(lhs); \
         CirStmtId stmt_id = CirCode_appendNewStmt(lhs); \
         CirStmt_toCmp(stmt_id, runtime_op, lhs_value, rhs_value, 0); \
@@ -632,15 +710,19 @@ CirBuild__plus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     lhs = CirCode_toExpr(lhs, false);
     rhs = CirCode_toExpr(rhs, false);
     const CirValue *lhs_value = CirCode_getValue(lhs);
+    if (!lhs_value)
+        cir_fatal("plus: lhs has no value");
     const CirValue *rhs_value = CirCode_getValue(rhs);
+    if (!rhs_value)
+        cir_fatal("plus: rhs has no value");
     const CirType *lhs_type = CirValue_getType(lhs_value);
     const CirType *rhs_type = CirValue_getType(rhs_value);
+    if (!lhs_type || !rhs_type)
+        goto fallback;
     lhs_type = CirType_lvalConv(lhs_type);
     rhs_type = CirType_lvalConv(rhs_type);
-    const CirType *lhs_unrolledType = lhs_type ? CirType_unroll(lhs_type) : NULL;
-    const CirType *rhs_unrolledType = rhs_type ? CirType_unroll(rhs_type) : NULL;
-    if (!lhs_unrolledType || !rhs_unrolledType)
-        goto fallback;
+    const CirType *lhs_unrolledType = CirType_unroll(lhs_type);
+    const CirType *rhs_unrolledType = CirType_unroll(rhs_type);
     if (CirType_isArithmetic(lhs_unrolledType) && CirType_isArithmetic(rhs_unrolledType)) {
         return CirBuild__plusA(lhs, rhs, mach);
     } else if (CirType_isPtr(lhs_unrolledType) && CirType_isInt(rhs_unrolledType)) {
@@ -695,20 +777,37 @@ CirBuild__minus(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
     lhs = CirCode_toExpr(lhs, false);
     rhs = CirCode_toExpr(rhs, false);
     const CirValue *lhs_value = CirCode_getValue(lhs);
+    if (!lhs_value)
+        cir_fatal("minus: lhs has no value");
     const CirValue *rhs_value = CirCode_getValue(rhs);
+    if (!rhs_value)
+        cir_fatal("minus: rhs has no value");
     const CirType *lhs_type = CirValue_getType(lhs_value);
     const CirType *rhs_type = CirValue_getType(rhs_value);
-    if (CirType_isArithmetic(lhs_type) && CirType_isArithmetic(rhs_type)) {
+    if (!lhs_type || !rhs_type)
+        goto fallback;
+    lhs_type = CirType_lvalConv(lhs_type);
+    rhs_type = CirType_lvalConv(rhs_type);
+    const CirType *lhs_unrolledType = CirType_unroll(lhs_type);
+    const CirType *rhs_unrolledType = CirType_unroll(rhs_type);
+    if (CirType_isArithmetic(lhs_unrolledType) && CirType_isArithmetic(rhs_unrolledType)) {
         return CirBuild__minusA(lhs, rhs, mach);
-    } else if (CirType_isPtr(lhs_type) && CirType_isInt(rhs_type)) {
+    } else if (CirType_isPtr(lhs_unrolledType) && CirType_isInt(rhs_unrolledType)) {
         CirCode_append(lhs, rhs);
         CirBuild__minusPtr(lhs, lhs_type, lhs_value, rhs_value);
         return lhs;
-    } else if (CirType_isPtr(lhs_type) && CirType_isPtr(rhs_type)) {
+    } else if (CirType_isPtr(lhs_unrolledType) && CirType_isPtr(rhs_unrolledType)) {
         cir_bug("TODO: MinusPP");
-    } else {
-        cir_fatal("Invalid operands to binary minus operator");
     }
+
+fallback:
+    CirCode_append(lhs, rhs);
+    CirVarId dst_id = CirVar_new(lhs);
+    const CirValue *dst_var = CirValue_ofVar(dst_id);
+    CirStmtId stmt_id = CirCode_appendNewStmt(lhs);
+    CirStmt_toBinOp(stmt_id, dst_var, CIR_BINOP_MINUS, lhs_value, rhs_value);
+    CirCode_setValue(lhs, dst_var);
+    return lhs;
 }
 
 CirCodeId
@@ -1120,7 +1219,7 @@ CirBuild__if(CirCodeId condCode, CirCodeId thenCode, CirCodeId elseCode)
 }
 
 CirCodeId
-CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode)
+CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCodeId afterCode, CirStmtId restStmtId)
 {
     assert(condCode);
 
@@ -1151,36 +1250,17 @@ CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCo
                 firstStmt = CirCode_getFirstStmt(thenCode);
             if (!firstStmt && afterCode)
                 firstStmt = CirCode_getFirstStmt(afterCode);
-            CirStmtId afterStmt = afterCode ? CirCode_getFirstStmt(afterCode) : 0;
-            if (!afterStmt)
-                afterStmt = firstStmt;
-            CirStmtId thenStartStmt = 0, thenEndStmt = 0;
-            if (thenCode) {
-                thenStartStmt = CirCode_getFirstStmt(thenCode);
-                thenEndStmt = CirCode_getLastStmt(thenCode);
-            }
             CirCode_append(condCode, thenCode);
             CirCode_append(condCode, afterCode);
             CirStmtId gotoStmt = CirCode_appendNewStmt(condCode);
             CirStmt_toGoto(gotoStmt, firstStmt ? firstStmt : gotoStmt);
             CirCode_setValue(condCode, NULL);
-            // Resolve breaks and continues within thenCode
-            CirStmtId restStmt = 0;
-            for (CirStmtId stmt_id = thenStartStmt; stmt_id; stmt_id = CirStmt_getNext(stmt_id)) {
-                if (CirStmt_isBreak(stmt_id)) {
-                    if (!restStmt)
-                        restStmt = CirCode_appendNewStmt(condCode);
-                    CirStmt_toGoto(stmt_id, restStmt);
-                } else if (CirStmt_isContinue(stmt_id)) {
-                    assert(afterStmt); // If there is at least one stmt in thenCode, then afterStmt will not be 0
-                    CirStmt_toGoto(stmt_id, afterStmt);
-                }
-                if (stmt_id == thenEndStmt)
-                    break;
-            }
+            // We still need to add the restStmtId because the loop body may break out of the loop
+            CirCode_appendOrphanStmt(condCode, restStmtId);
             return condCode;
         } else if (genNoLoop) {
             CirCode_setValue(condCode, NULL);
+            // No need to add the restStmtId either because the loop body is guaranteed to not run at all
             return condCode;
         }
 
@@ -1191,14 +1271,6 @@ CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCo
     // Is a Cond, will need to do backpatching
     assert(CirCode_isCond(condCode));
     assert(firstStmt);
-    CirStmtId afterStmt = afterCode ? CirCode_getFirstStmt(afterCode) : 0;
-    if (!afterStmt)
-        afterStmt = firstStmt;
-    CirStmtId thenStartStmt = 0, thenEndStmt = 0;
-    if (thenCode) {
-        thenStartStmt = CirCode_getFirstStmt(thenCode);
-        thenEndStmt = CirCode_getLastStmt(thenCode);
-    }
 
     CirCodeId trueFirstStmt;
     if (thenCode && (trueFirstStmt = CirCode_getFirstStmt(thenCode))) {
@@ -1218,25 +1290,14 @@ CirBuild__for(CirCodeId condCode, CirStmtId firstStmt, CirCodeId thenCode, CirCo
         backpatch(&codes[condCode].truejumps, firstStmt);
     }
 
-    CirStmtId restStmt = CirCode_appendNewStmt(condCode);
-    backpatch(&codes[condCode].falsejumps, restStmt);
-
-    // Resolve breaks and continues within thenCode
-    for (CirStmtId stmt_id = thenStartStmt; stmt_id; stmt_id = CirStmt_getNext(stmt_id)) {
-        if (CirStmt_isBreak(stmt_id))
-            CirStmt_toGoto(stmt_id, restStmt);
-        else if (CirStmt_isContinue(stmt_id))
-            CirStmt_toGoto(stmt_id, afterStmt);
-        if (stmt_id == thenEndStmt)
-            break;
-    }
+    CirCode_appendOrphanStmt(condCode, restStmtId);
+    backpatch(&codes[condCode].falsejumps, restStmtId);
 
     // All truejumps/falsejumps should have been consumed
     assert(codes[condCode].truejumps.len == 0);
     assert(codes[condCode].falsejumps.len == 0);
     condCode = CirCode_toExpr(condCode, true);
     return condCode;
-
 }
 
 CirCodeId
@@ -1315,7 +1376,7 @@ CirBuild__deref(CirCodeId code_id)
     const CirType *valueType = CirValue_getType(value);
     if (valueType)
         valueType = CirType_lvalConv(valueType);
-    if (CirValue_getNumFields(value) || CirValue_isMem(value)) {
+    if (!valueType || CirValue_getNumFields(value) || CirValue_isMem(value)) {
         // Must use temporary
         CirVarId tmp_id = CirVar_new(code_id);
         if (valueType)
@@ -1331,4 +1392,182 @@ CirBuild__deref(CirCodeId code_id)
         CirCode_setValue(code_id, CirValue_ofMem(CirValue_getVar(value)));
     }
     return code_id;
+}
+
+CirCodeId
+CirBuild__lshift(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    SHIFT_TEMPLATE("lshift", CIR_BINOP_SHIFTLT, a << b);
+}
+
+CirCodeId
+CirBuild__rshift(CirCodeId lhs, CirCodeId rhs, const CirMachine *mach)
+{
+    SHIFT_TEMPLATE("rshift", CIR_BINOP_SHIFTRT, a >> b);
+}
+
+CirCodeId
+CirBuild__ternary(CirCodeId condCodeId, CirCodeId thenCodeId, CirCodeId elseCodeId, const CirMachine *mach)
+{
+    thenCodeId = CirCode_toExpr(thenCodeId, false);
+    elseCodeId = CirCode_toExpr(elseCodeId, false);
+
+    const CirValue *thenValue = CirCode_getValue(thenCodeId);
+    const CirValue *elseValue = CirCode_getValue(elseCodeId);
+
+    if (!thenValue && !elseValue) {
+        // Both operands have void type
+        condCodeId = CirBuild__if(condCodeId, thenCodeId, elseCodeId);
+        assert(!CirCode_getValue(condCodeId));
+        return condCodeId;
+    }
+
+    if (!thenValue)
+        cir_fatal("ternary: thenCode has no value");
+    const CirType *thenType = CirValue_getType(thenValue);
+    if (thenType)
+        thenType = CirType_lvalConv(thenType);
+
+    if (!elseValue)
+        cir_fatal("ternary: elseCode has no value");
+    const CirType *elseType = CirValue_getType(elseValue);
+    if (elseType)
+        elseType = CirType_lvalConv(elseType);
+
+    // Compute dstType
+    const CirType *dstType = NULL;
+    if (!thenType || !elseType)
+        goto fallback;
+
+    const CirType *thenUnrolledType = CirType_unroll(thenType);
+    const CirType *elseUnrolledType = CirType_unroll(elseType);
+
+    // TODO: is this actually conformant with the C spec?
+    if (CirType_isArithmetic(thenUnrolledType) && CirType_isArithmetic(elseUnrolledType)) {
+        dstType = CirType__arithmeticConversion(thenType, elseType, mach);
+    } else if (CirType_isComp(thenUnrolledType) && CirType_isComp(elseUnrolledType) && CirType_getCompId(thenUnrolledType) == CirType_getCompId(elseUnrolledType)) {
+        dstType = thenType;
+    } else if (CirType_isPtr(thenUnrolledType) && CirType_isPtr(elseUnrolledType) && CirType_equals(CirType_getBaseType(thenUnrolledType), CirType_getBaseType(elseUnrolledType))) {
+        dstType = thenType;
+    } else {
+        cir_fatal("ternary: invalid then-else type combination");
+    }
+
+    // The type of code we actually generate depends on whether condCode is a constant
+    if (CirCode_isExpr(condCodeId)) {
+        const CirValue *value = CirCode_getValue(condCodeId);
+        if (!value)
+            cir_fatal("ternary: conditional expression has no value");
+
+        // Is this a constant?
+        if (CirValue_isInt(value)) {
+            // Only need to generate thenCode/elseCode
+            uint64_t val = CirValue_getU64(value);
+            if (val) {
+                // thenCode only
+                CirCode_append(condCodeId, thenCodeId);
+                CirCode_setValue(condCodeId, thenValue);
+                return condCodeId;
+            } else {
+                // elseCode only
+                CirCode_append(condCodeId, elseCodeId);
+                CirCode_setValue(condCodeId, elseValue);
+                return condCodeId;
+            }
+        }
+
+        toCond(condCodeId, NULL);
+        // Fallthrough to the rest of the code to process the condCode
+    }
+
+fallback:
+    ;
+
+    CirVarId tmpVarId = CirVar_new(condCodeId);
+    CirVar_setType(tmpVarId, dstType);
+    const CirValue *tmpVarValue = CirValue_ofVar(tmpVarId);
+    CirStmtId stmtId;
+    stmtId = CirCode_appendNewStmt(thenCodeId);
+    CirStmt_toUnOp(stmtId, tmpVarValue, CIR_UNOP_IDENTITY, thenValue);
+    stmtId = CirCode_appendNewStmt(elseCodeId);
+    CirStmt_toUnOp(stmtId, tmpVarValue, CIR_UNOP_IDENTITY, elseValue);
+    condCodeId = CirBuild__if(condCodeId, thenCodeId, elseCodeId);
+    assert(CirCode_isExpr(condCodeId));
+    CirCode_setValue(condCodeId, tmpVarValue);
+    return condCodeId;
+}
+
+void
+CirCode_typecheck(CirCodeId codeId, const CirMachine *mach)
+{
+    if (!mach)
+        mach = CirMachine_getHost();
+    for (CirStmtId stmtId = CirCode_getFirstStmt(codeId); stmtId; stmtId = CirStmt_getNext(stmtId))
+        CirStmt_typecheck(stmtId, mach);
+}
+
+typedef struct CirNameToCirStmtId {
+    CirName key;
+    CirStmtId stmtId;
+} CirNameToCirStmtId;
+
+static void
+CirNameToCirStmtId_insertItem(CirNameToCirStmtId *table, size_t size, CirName key, CirStmtId stmtId)
+{
+    size_t i;
+    for (i = key % size; table[i].key; i = (i + 1) % size);
+    table[i].key = key;
+    table[i].stmtId = stmtId;
+}
+
+static CirStmtId
+CirNameToCirStmtId_lookup(CirNameToCirStmtId *table, size_t size, CirName key)
+{
+    for (size_t i = key % size; table[i].key; i = (i + 1) % size) {
+        if (table[i].key == key)
+            return table[i].stmtId;
+    }
+    return 0;
+}
+
+void
+CirCode_resolveLabels(CirCodeId codeId)
+{
+    // First count the number of labels
+    size_t numLabels = 0;
+    for (CirStmtId stmtId = CirCode_getFirstStmt(codeId); stmtId; numLabels++, stmtId = CirStmt_getNext(stmtId));
+
+    // Alloc hashtable
+    size_t tableSize = CirPrime_ge(numLabels * 2);
+    CirNameToCirStmtId *table = cir__zalloc(sizeof(CirNameToCirStmtId) * tableSize);
+
+    // Build hashtable
+    CirStmtId targetStmt = CirCode_getLastStmt(codeId);
+    for (CirStmtId stmtId = CirCode_getLastStmt(codeId); stmtId; stmtId = CirStmt_getPrev(stmtId)) {
+        if (CirStmt_isLabel(stmtId)) {
+            CirName name = CirStmt_getLabelName(stmtId);
+            assert(name);
+            CirStmtId query = CirNameToCirStmtId_lookup(table, tableSize, name);
+            if (query)
+                cir_fatal("duplicate label: %s", CirName_cstr(name));
+            assert(targetStmt);
+            CirNameToCirStmtId_insertItem(table, tableSize, name, targetStmt);
+        } else {
+            targetStmt = stmtId;
+        }
+    }
+
+    // Resolve goto-label stmts
+    for (CirStmtId stmtId = CirCode_getFirstStmt(codeId); stmtId; stmtId = CirStmt_getNext(stmtId)) {
+        if (CirStmt_isGotoLabel(stmtId)) {
+            CirName targetName = CirStmt_getLabelName(stmtId);
+            assert(targetName);
+            CirStmtId jumpTarget = CirNameToCirStmtId_lookup(table, tableSize, targetName);
+            if (!jumpTarget)
+                cir_fatal("no such label: %s", CirName_cstr(targetName));
+            CirStmt_toGoto(stmtId, jumpTarget);
+        }
+    }
+
+    cir__xfree(table);
 }

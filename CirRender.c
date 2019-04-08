@@ -159,8 +159,10 @@ orderComp(RenderItemArray *out, uint8_t *cidStatus, uint8_t *tidStatus, CirCompI
 static void
 orderValue(RenderItemArray *out, uint8_t *vidStatus, uint8_t *cidStatus, uint8_t *tidStatus, uint8_t *stmtStatus, const CirValue *value, CirVarId parentVid)
 {
-    if (CirValue_isString(value) || CirValue_isInt(value)) {
+    if (CirValue_isString(value) || CirValue_isInt(value) || CirValue_isUser(value)) {
         // Do nothing
+    } else if (CirValue_isType(value)) {
+        orderType(out, cidStatus, tidStatus, CirValue_getTypeValue(value), false);
     } else if (CirValue_isLval(value)) {
         CirVarId vid = CirValue_getVar(value);
         if (vid != parentVid)
@@ -189,14 +191,16 @@ orderVar(RenderItemArray *out, uint8_t *vidStatus, uint8_t *cidStatus, uint8_t *
     if (owner) {
         // We do not need to "define" the variable in global, however we do need to define its types.
         const CirType *type = CirVar_getType(vid);
-        orderType(out, cidStatus, tidStatus, type, true);
+        if (type) // May still be __auto_type
+            orderType(out, cidStatus, tidStatus, type, true);
         vidStatus[vid] = STATUS_VISITED;
         return;
     }
 
     vidStatus[vid] = STATUS_VISITING;
     const CirType *type = CirVar_getType(vid);
-    orderType(out, cidStatus, tidStatus, type, false);
+    if (type) // May still be __auto_type
+        orderType(out, cidStatus, tidStatus, type, false);
     CirCodeId code_id = CirVar_getCode(vid);
     if (code_id) {
         CirStmtId stmt_id = CirCode_getFirstStmt(code_id);
@@ -224,7 +228,7 @@ orderVar(RenderItemArray *out, uint8_t *vidStatus, uint8_t *cidStatus, uint8_t *
                 }
                 const CirValue *dst = CirStmt_getDst(stmt_id);
                 if (dst)
-                    orderValue(out, vidStatus, tidStatus, cidStatus, stmtStatus, dst, vid);
+                    orderValue(out, vidStatus, cidStatus, tidStatus, stmtStatus, dst, vid);
             } else if (CirStmt_isReturn(stmt_id)) {
                 const CirValue *operand1 = CirStmt_getOperand1(stmt_id);
                 if (operand1)

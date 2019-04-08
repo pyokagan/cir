@@ -28,6 +28,7 @@ CirMachine__initBuiltin(CirMachine *mach)
     mach->sizeofFloat = sizeof(float);
     mach->sizeofDouble = sizeof(double);
     mach->sizeofLongDouble = sizeof(long double);
+    mach->sizeofFloat128 = sizeof(_Float128);
     mach->sizeofVoid = sizeof(void);
     mach->sizeofFun = sizeof(int(void));
     mach->sizeofSizeT = sizeof(size_t);
@@ -41,6 +42,7 @@ CirMachine__initBuiltin(CirMachine *mach)
     mach->alignofFloat = _Alignof(float);
     mach->alignofDouble = _Alignof(double);
     mach->alignofLongDouble = _Alignof(long double);
+    mach->alignofFloat128 = _Alignof(_Float128);
     mach->alignofFun = _Alignof(int(void));
 #if defined(CHAR_MIN)
 #if CHAR_MIN < 0

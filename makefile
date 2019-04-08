@@ -6,15 +6,19 @@ OBJECTS= \
 		CirArray.o \
 		CirAttr.o \
 		CirBBuf.o \
+		CirBuiltin.o \
 		CirCode.o \
 		CirComp.o \
 		CirDl.o \
+		CirEnum.o \
+		CirEnumItem.o \
 		CirEnv.o \
 		CirFkind.o \
 		CirHash.o \
 		CirIkind.o \
 		CirLex.o \
 		CirLog.o \
+		CirLoopEnv.o \
 		CirMachine.o \
 		CirMem.o \
 		CirName.o \
@@ -32,20 +36,24 @@ OBJECTS= \
 
 all: cir
 cir: $(OBJECTS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS) -ldl
 
 CirArray.o: CirArray.c $(HEADERS)
 CirAttr.o: CirAttr.c $(HEADERS)
 CirBBuf.o: CirBBuf.c $(HEADERS)
+CirBuiltin.o: CirBuiltin.c $(HEADERS)
 CirCode.o: CirCode.c $(HEADERS)
 CirComp.o: CirComp.c $(HEADERS)
 CirDl.o: CirDl.c $(HEADERS)
+CirEnum.o: CirEnum.c $(HEADERS)
+CirEnumItem.o: CirEnumItem.c $(HEADERS)
 CirEnv.o: CirEnv.c $(HEADERS)
 CirFkind.o: CirFkind.c $(HEADERS)
 CirHash.o: CirHash.c $(HEADERS)
 CirIkind.o: CirIkind.c $(HEADERS)
 CirLex.o: CirLex.c $(HEADERS)
 CirLog.o: CirLog.c $(HEADERS)
+CirLoopEnv.o: CirLoopEnv.c $(HEADERS)
 CirMachine.o: CirMachine.c $(HEADERS)
 CirMem.o: CirMem.c $(HEADERS)
 CirName.o: CirName.c $(HEADERS)

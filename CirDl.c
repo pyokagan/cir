@@ -6,6 +6,7 @@
 #include <wchar.h>
 #include <ctype.h>
 #include <setjmp.h>
+#include <dlfcn.h>
 
 #define xstr(s) str(s)
 #define str(s) #s
@@ -30,6 +31,7 @@ static struct {
     SYM(cir_warn),
     SYM(cir_log),
     SYM(CirPrime_ge),
+    SYM(CirMem_balloc),
     SYM(CirMachine_getBuild),
     SYM(CirMachine_getHost),
     SYM(CirIkind_size),
@@ -62,15 +64,18 @@ static struct {
     SYM(CirType_isFun),
     SYM(CirType_isNamed),
     SYM(CirType_isComp),
+    SYM(CirType_isEnum),
     SYM(CirType_isVaList),
     SYM(CirType_getBaseType),
     SYM(CirType_getTypedefId),
     SYM(CirType_getCompId),
+    SYM(CirType_getEnumId),
     SYM(CirType_void),
     SYM(CirType_int),
     SYM(CirType_float),
     SYM(CirType_typedef),
     SYM(CirType_comp),
+    SYM(CirType_enum),
     SYM(CirType_ptr),
     SYM(CirType_array),
     SYM(CirType_arrayWithLen),
@@ -93,6 +98,10 @@ static struct {
     SYM(CirType_alignof),
     SYM(CirType_sizeof),
     SYM(CirType_log),
+    SYM(CirType_equals),
+    SYM(CirBuiltin_ofName),
+    SYM(CirBuiltin_getName),
+    SYM(CirBuiltin_getType),
     SYM(CirVar_new),
     SYM(CirVar_getName),
     SYM(CirVar_setName),
@@ -101,6 +110,7 @@ static struct {
     SYM(CirVar_getFormal),
     SYM(CirVar_setFormal),
     SYM(CirVar_getCode),
+    SYM(CirVar_setCode),
     SYM(CirVar_getOwner),
     SYM(CirVar_getStorage),
     SYM(CirVar_setStorage),
@@ -133,17 +143,39 @@ static struct {
     SYM(CirComp_getSize),
     SYM(CirComp_getFieldBitsOffset),
     SYM(CirComp_log),
+    SYM(CirEnum_new),
+    SYM(CirEnum_getName),
+    SYM(CirEnum_setName),
+    SYM(CirEnum_getNumItems),
+    SYM(CirEnum_setNumItems),
+    SYM(CirEnum_getItem),
+    SYM(CirEnum_setItem),
+    SYM(CirEnum_getIkind),
+    SYM(CirEnum_setIkind),
+    SYM(CirEnum_isDefined),
+    SYM(CirEnum_setDefined),
+    SYM(CirEnumItem_new),
+    SYM(CirEnumItem_getName),
+    SYM(CirEnumItem_getI64),
+    SYM(CirEnumItem_setI64),
+    SYM(CirValue_registerUser),
     SYM(CirValue_ofU64),
     SYM(CirValue_ofI64),
     SYM(CirValue_ofVar),
     SYM(CirValue_ofMem),
+    SYM(CirValue_ofUser),
     SYM(CirValue_ofString),
     SYM(CirValue_ofCString),
+    SYM(CirValue_ofType),
+    SYM(CirValue_ofBuiltin),
     SYM(CirValue_isInt),
     SYM(CirValue_isString),
     SYM(CirValue_isVar),
     SYM(CirValue_isMem),
     SYM(CirValue_isLval),
+    SYM(CirValue_isUser),
+    SYM(CirValue_isType),
+    SYM(CirValue_isBuiltin),
     SYM(CirValue_getU64),
     SYM(CirValue_getI64),
     SYM(CirValue_getString),
@@ -152,12 +184,19 @@ static struct {
     SYM(CirValue_withFields),
     SYM(CirValue_getVar),
     SYM(CirValue_withVar),
-    SYM(CirValue_computeBitsOffset),
+    SYM(CirValue_getPtr),
     SYM(CirValue_getType),
+    SYM(CirValue_getRawType),
     SYM(CirValue_getCastType),
     SYM(CirValue_withCastType),
+    SYM(CirValue_getTypeValue),
     SYM(CirValue_log),
+    SYM(CirStmt_registerUser),
+    SYM(CirStmt_newOrphan),
     SYM(CirStmt_newAfter),
+    SYM(CirStmt_newBefore),
+    SYM(CirStmt_orphanize),
+    SYM(CirStmt_isOrphan),
     SYM(CirStmt_toNop),
     SYM(CirStmt_toUnOp),
     SYM(CirStmt_toBinOp),
@@ -165,8 +204,9 @@ static struct {
     SYM(CirStmt_toReturn),
     SYM(CirStmt_toCmp),
     SYM(CirStmt_toGoto),
-    SYM(CirStmt_toBreak),
-    SYM(CirStmt_toContinue),
+    SYM(CirStmt_toLabel),
+    SYM(CirStmt_toGotoLabel),
+    SYM(CirStmt_toUser),
     SYM(CirStmt_isNop),
     SYM(CirStmt_isUnOp),
     SYM(CirStmt_isBinOp),
@@ -175,22 +215,33 @@ static struct {
     SYM(CirStmt_isCmp),
     SYM(CirStmt_isGoto),
     SYM(CirStmt_isJump),
-    SYM(CirStmt_isBreak),
-    SYM(CirStmt_isContinue),
+    SYM(CirStmt_isLabel),
+    SYM(CirStmt_isGotoLabel),
+    SYM(CirStmt_isUser),
     SYM(CirStmt_getOp),
     SYM(CirStmt_getDst),
     SYM(CirStmt_getOperand1),
     SYM(CirStmt_getOperand2),
+    SYM(CirStmt_getNumOperands),
+    SYM(CirStmt_getOperand),
+    SYM(CirStmt_setOperand),
     SYM(CirStmt_getNumArgs),
     SYM(CirStmt_getArg),
     SYM(CirStmt_getJumpTarget),
     SYM(CirStmt_setJumpTarget),
+    SYM(CirStmt_getLabelName),
+    SYM(CirStmt_setLabelName),
+    SYM(CirStmt_getPtr),
+    SYM(CirStmt_setPtr),
     SYM(CirStmt_getNext),
     SYM(CirStmt_getPrev),
     SYM(CirStmt_log),
+    SYM(CirStmt_typecheck),
     SYM(CirCode_ofExpr),
     SYM(CirCode_ofCond),
     SYM(CirCode_appendNewStmt),
+    SYM(CirCode_prependNewStmt),
+    SYM(CirCode_appendOrphanStmt),
     SYM(CirCode_isExpr),
     SYM(CirCode_isCond),
     SYM(CirCode_free),
@@ -206,6 +257,8 @@ static struct {
     SYM(CirCode_dump),
     SYM(CirCode_getNumVars),
     SYM(CirCode_getVar),
+    SYM(CirCode_typecheck),
+    SYM(CirCode_resolveLabels),
 
 // C library
     // https://www.ibm.com/support/knowledgecenter/en/ssw_ibm_i_71/rtref/stalib.htm
@@ -337,6 +390,17 @@ static struct {
     {}
 };
 
+static CirArray(void *) loadedLibraries;
+
+void
+CirDl_loadLibrary(const char *filename)
+{
+    void *handle = dlopen(filename, RTLD_LAZY | RTLD_LOCAL);
+    if (!handle)
+        cir_fatal("failed to load library: %s", filename);
+    CirArray_push(&loadedLibraries, &handle);
+}
+
 bool
 CirDl_findSymbol(const char *name, void **out)
 {
@@ -345,6 +409,16 @@ CirDl_findSymbol(const char *name, void **out)
             *out = builtinsymbols[i].ptr;
             return true;
         }
+    }
+
+    for (size_t i = 0; i < loadedLibraries.len; i++) {
+        dlerror(); // clear dlerror
+        void *ptr = dlsym(loadedLibraries.items[i], name);
+        const char *err = dlerror();
+        if (err)
+            continue;
+        *out = ptr;
+        return true;
     }
 
     return false;

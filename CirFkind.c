@@ -10,6 +10,8 @@ CirFkind_size(uint32_t fkind, const CirMachine *mach)
         return mach->sizeofDouble;
     case CIR_FLONGDOUBLE:
         return mach->sizeofLongDouble;
+    case CIR_F128:
+        return mach->sizeofFloat128;
     default:
         cir_bug("invalid fkind");
     }
@@ -24,6 +26,8 @@ CirFkind_fromSize(uint32_t size, const CirMachine *mach)
         return CIR_FDOUBLE;
     else if (size == mach->sizeofLongDouble)
         return CIR_FLONGDOUBLE;
+    else if (size == mach->sizeofFloat128)
+        return CIR_F128;
     else
         cir_fatal("cannot find a fkind with size %u", (unsigned)size);
 }

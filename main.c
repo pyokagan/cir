@@ -8,12 +8,22 @@ main(int argc, char *argv[])
     CirX64_test();
 #endif
 #if 1
-    if (argc != 2)
-        cir_fatal("not enough arguments");
-
     CirMachine__initBuiltin(&CirMachine__host);
     CirMachine__initBuiltin(&CirMachine__build);
-    CirLex__init(argv[1], &CirMachine__host);
+    CirBuiltin_init(&CirMachine__host);
+
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == 'l') {
+            CirDl_loadLibrary(&argv[i][2]);
+        } else {
+            break;
+        }
+    }
+    if (i >= argc)
+        cir_fatal("not enough arguments");
+
+    CirLex__init(argv[i], &CirMachine__host);
     cir__parse(&CirMachine__host);
     CirRender();
     return 0;

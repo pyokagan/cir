@@ -989,7 +989,7 @@ static uint32_t primes[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
 uint64_t
 CirPrime_ge(uint64_t target)
 {
-    size_t low = 0, high = sizeof(primes) / sizeof(primes[0]);
+    size_t low = 0, high = sizeof(primes) / sizeof(primes[0]) - 1;
     while (low <= high) {
         size_t mid = (low + high) / 2;
         if (primes[mid] >= target) {
